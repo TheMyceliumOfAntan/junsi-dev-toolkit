@@ -23,6 +23,7 @@ from mcp.types import (
     PromptMessage,
     Resource,
     ResourceContents,
+    TextContent,
     TextResourceContents,
     Tool,
 )
@@ -359,7 +360,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextResourceContents]:
         for doc_type in doc_types:
             result += f"\n- [ ] `2-架构设计/{doc_type}.md`"
 
-    return [TextResourceContents(type="text", text=result)]
+    return [TextContent(type="text", text=result)]
 
 
 @app.list_resources()
