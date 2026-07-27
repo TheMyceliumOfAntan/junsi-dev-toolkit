@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MCP 日志
+*.log
+
+# 用户项目文档（保留结构，忽略内容）
+docs/junsi-dev-docs/*.md
+!docs/junsi-dev-docs/README.md
