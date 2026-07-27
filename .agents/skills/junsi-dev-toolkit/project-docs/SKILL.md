@@ -19,7 +19,7 @@ description: 项目知识中枢。通过 MCP Server 统一管理所有项目文�
 | 创建 ADR | `create_adr` | 创建架构决策记录 |
 | 更新文档 | `update_doc` | 更新现有文档 |
 | 整理文档 | `organize_docs` | 扫描并归类散落文档 |
-| 生成文档 | `generate_docs` | 根据代码生成文档 |
+| 生成专题文档 | `generate_docs` | 生成任意类型的专题文档（如启动流程、联机流程），AI 先分析代码再生成 |
 
 ### 2. MCP 调用方式
 

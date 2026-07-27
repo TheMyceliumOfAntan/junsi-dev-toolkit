@@ -277,24 +277,36 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="generate_docs",
-            description="根据代码生成文档。分析项目结构生成技术选型、模块划分、API 列表等。",
+            description="生成项目文档。支持任意类型的专题文档（如启动流程、联机流程、部署流程等）。用户提供代码分析结果，工具生成结构化文档。",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "doc_types": {
-                        "type": "array",
-                        "enum": ["技术选型", "模块划分", "API列表", "表结构说明"],
-                        "description": "要生成的文档类型"
+                    "doc_type": {
+                        "type": "string",
+                        "description": "文档类型，如 '启动流程'、'联机流程'、'部署流程'、'认证流程' 等，不限制预设值"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "AI 预先分析好的文档内容（Markdown 格式），包括代码分析、流程说明、关键节点等"
+                    },
+                    "target_path": {
+                        "type": "string",
+                        "description": "文档保存路径（相对于 docs/junsi-dev-docs/），如 '2-架构设计/启动流程.md'，不填则自动生成"
+                    },
+                    "append_to_existing": {
+                        "type": "boolean",
+                        "description": "是否追加到已有文档，默认为 false（覆盖）",
+                        "default": False
                     }
                 },
-                "required": ["doc_types"]
+                "required": ["doc_type", "content"]
             }
         )
     ]
 
 
 @app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextResourceContents]:
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     result = ""
 
     if name == "query_docs":
@@ -341,24 +353,70 @@ async def call_tool(name: str, arguments: dict) -> list[TextResourceContents]:
             result += "\n\n（仅模拟运行，未实际移动文件）"
 
     elif name == "generate_docs":
-        doc_types = arguments.get("doc_types", ["技术选型"])
-        result = "📝 文档生成功能已触发。分析项目结构..."
-        tech_stack = []
-        if (PROJECT_ROOT / "package.json").exists():
-            tech_stack.append("Node.js")
-        if (PROJECT_ROOT / "go.mod").exists():
-            tech_stack.append("Go")
-        if (PROJECT_ROOT / "pom.xml").exists():
-            tech_stack.append("Java/Maven")
-        if (PROJECT_ROOT / ".csproj").exists():
-            tech_stack.append(".NET/C#")
-        if (PROJECT_ROOT / "requirements.txt").exists():
-            tech_stack.append("Python")
+        doc_type = arguments.get("doc_type", "未命名文档")
+        content = arguments.get("content", "")
+        target_path = arguments.get("target_path")
+        append = arguments.get("append_to_existing", False)
 
-        result += f"\n- 识别到技术栈：{', '.join(tech_stack) if tech_stack else '未识别'}"
-        result += "\n\n建议生成以下文档："
-        for doc_type in doc_types:
-            result += f"\n- [ ] `2-架构设计/{doc_type}.md`"
+        if not target_path:
+            category_map = {
+                "启动": "2-架构设计",
+                "流程": "2-架构设计",
+                "架构": "2-架构设计",
+                "部署": "8-部署运维",
+                "运维": "8-部署运维",
+                "API": "3-API规范",
+                "接口": "3-API规范",
+                "数据库": "5-数据库设计",
+                "表结构": "5-数据库设计",
+                "UI": "6-UI/组件设计",
+                "组件": "6-UI/组件设计",
+                "调用": "7-调用规范",
+                "通信": "7-调用规范",
+                "需求": "9-系统要求",
+                "功能": "9-系统要求",
+            }
+            category = "2-架构设计"
+            for key, cat in category_map.items():
+                if key in doc_type:
+                    category = cat
+                    break
+            safe_name = doc_type.replace("/", "-").replace("\\", "-")
+            target_path = f"{category}/{safe_name}.md"
+
+        full_path = DOCS_ROOT / target_path
+
+        doc_content = f"""# {doc_type}
+
+> 由 AI 基于代码分析生成 | 生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+{content}
+
+## 修订记录
+| 日期 | 版本 | 修改内容 | 修改人 |
+|:---|:---|:---|:---|
+| {datetime.now().strftime("%Y-%m-%d")} | v1.0 | 初版创建（AI 生成） | AI Agent |
+"""
+
+        if append and full_path.exists():
+            existing = read_file(full_path)
+            if "## 修订记录" in existing:
+                parts = existing.split("## 修订记录")
+                doc_content = parts[0] + doc_content + "\n## 修订记录" + parts[1]
+            else:
+                doc_content = existing + "\n\n" + doc_content
+
+        if write_file(full_path, doc_content):
+            result = f"""✅ 文档已生成
+
+- 类型：{doc_type}
+- 路径：`docs/junsi-dev-docs/{target_path}`
+- 操作：{'追加' if append else '创建'}
+
+💡 如需调整内容，可直接编辑上述文件，或告诉我修改。
+"""
+        else:
+            result = f"❌ 文档生成失败：{full_path}"
 
     return [TextContent(type="text", text=result)]
 
