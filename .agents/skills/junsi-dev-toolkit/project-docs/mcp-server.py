@@ -71,6 +71,37 @@ SZ = 500  # 单工具最大返回字符数（防止撑爆上下文）
 def trunc(text: str, max_chars: int = SZ) -> str:
     return text if len(text) <= max_chars else text[:max_chars] + "\n... (truncated)"
 
+# ── 语言/层识别 ─────────────────────────────────────────────
+
+_LANG_MAP = {
+    '.cs': 'C#', '.rs': 'Rust', '.ts': 'TS', '.tsx': 'TSX',
+    '.js': 'JS', '.mjs': 'JS', '.cjs': 'JS',
+    '.py': 'Python', '.csproj': 'C#', '.sln': 'C#',
+    '.json': 'JSON', '.toml': 'TOML', '.yaml': 'YAML', '.yml': 'YAML',
+    '.css': 'CSS', '.html': 'HTML', '.xml': 'XML',
+    '.md': 'Markdown',
+}
+
+def file_lang(path: str) -> str:
+    ext = Path(path).suffix.lower()
+    return _LANG_MAP.get(ext, '')
+
+def file_layer(path: str) -> str:
+    """判断属于哪个项目层（按优先级：Tauri > Backend > Frontend > Docs）"""
+    p = path.replace('\\', '/')
+    if '/src-tauri/' in p: return 'Tauri(Rust)'
+    if '/src-backend/' in p: return 'Backend(C#)'
+    if '/src/' in p: return 'Frontend(TS)'
+    if '/docs/' in p: return 'Docs'
+    return ''
+
+def tag(path: str) -> str:
+    """给文件路径加上语言标签"""
+    lang = file_lang(path)
+    layer = file_layer(path)
+    tags = ' '.join(filter(None, [f'[{lang}]' if lang else '', layer]))
+    return f"{tags} {path}" if tags else path
+
 # ── 文档工具（原） ─────────────────────────────────────────
 
 def search_docs(keywords: str, category: Optional[str] = None) -> List[Dict[str, str]]:
@@ -362,6 +393,36 @@ def _extract_hooks() -> List[Dict[str, str]]:
             hooks.append({"name": m.group(1), "file": safe_relative(ts)})
     return hooks
 
+def _extract_code_context(rel_path: str) -> Dict[str, Any]:
+    """分析单个文件：语言、层、关键定义"""
+    fp = PROJECT_ROOT / rel_path.replace("/", os.sep).replace("\\", os.sep)
+    if not fp.exists() or not fp.is_file():
+        return {"error": f"文件不存在: {rel_path}"}
+    content = read_file(fp)
+    if not content:
+        return {"error": "文件为空或无法读取"}
+    lines = content.split("\n")
+    info = {
+        "file": tag(rel_path),
+        "language": file_lang(rel_path) or "未知",
+        "layer": file_layer(rel_path) or "未知",
+        "size": f"{len(lines)} 行",
+    }
+    # 提取关键定义
+    ext = fp.suffix.lower()
+    if ext == '.rs':
+        info["definitions"] = re.findall(r'(?:pub\s+)?(?:fn|struct|enum|trait|impl|mod|const|static|type)\s+(\w[\w<>]*)', content)[:15]
+        info["tauri_commands"] = re.findall(r'#\[tauri::command\]\s*\n\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+(\w+)', content)
+    elif ext == '.cs':
+        info["definitions"] = re.findall(r'(?:public|private|internal|protected)?\s*(?:static\s+)?(?:class|interface|record|struct|enum|void|Task|IActionResult|string|int|bool|long|Guid)\s+(\w[\w<>]*)', content)[:15]
+        info["endpoints"] = [m.group(1) for m in re.finditer(r'(?:app|group)\.Map(GET|POST|PUT|DELETE|PATCH)\(', content, re.IGNORECASE)]
+    elif ext in ('.ts', '.tsx'):
+        info["exports"] = re.findall(r'export\s+(?:default\s+)?(?:function|const|class|type|interface)\s+(\w+)', content)[:15]
+        info["imports"] = re.findall(r"import\s+(?:\{[^}]*\}|\w+)\s+from\s+['\"]([^'\"]+)['\"]", content)[:10]
+    elif ext == '.py':
+        info["definitions"] = re.findall(r'(?:async\s+)?def\s+(\w+)|class\s+(\w+)', content)[:15]
+    return info
+
 # ── 工具注册 ────────────────────────────────────────────────
 
 @app.list_tools()
@@ -443,6 +504,11 @@ async def list_tools() -> list[Tool]:
         Tool(name="hooks",
              description="扫描 src/hooks/ 自定义 React Hook 列表。",
              inputSchema={"type": "object","properties": {}}),
+        Tool(name="code_context",
+             description="分析单个文件：语言、所属层、关键定义（函数/类/导出/导入）。迁移或修 bug 时用来确认文件身份。",
+             inputSchema={"type": "object","properties": {
+                 "path": {"type": "string", "description": "文件相对路径，如 'src-tauri/src/lib.rs'、'src-backend/.../Program.cs'"}
+             }, "required": ["path"]}),
     ]
 
 # ── 工具调用分发 ────────────────────────────────────────────
@@ -526,7 +592,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             lines = [f"📡 共 {len(eps)} 个端点：", ""]
             for e in sorted(eps, key=lambda x: (x["route"], x["method"])):
-                lines.append(f"  [{e['method']:>6}]  {e['route']}  ← {e['file']}")
+                lines.append(f"  [{e['method']:>6}]  {e['route']}  ← {tag(e['file'])}")
             result = trunc("\n".join(lines), 3000)
 
     elif name == "frontend_routes":
@@ -546,7 +612,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             lines = [f"🧭 共 {len(routes)} 个路由：", ""]
             for r in sorted(routes, key=lambda x: x.get("path","")):
                 comp = r.get("component", "")
-                lines.append(f"  {r['path']:30s} → {comp + '  ' if comp else ''}({r.get('file','')})")
+                lines.append(f"  {r['path']:30s} → {comp + '  ' if comp else ''}({tag(r.get('file',''))})")
             result = trunc("\n".join(lines), 2000)
 
     elif name == "component_inventory":
@@ -564,11 +630,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if funcs:
                 lines.append(f"📦 组件 ({len(funcs)})：")
                 for c in funcs:
-                    lines.append(f"  {c['name']:30s} {c['file']}")
+                    lines.append(f"  {c['name']:30s} {tag(c['file'])}")
             if ifaces:
                 lines.append(f"📐 Props 接口 ({len(ifaces)})：")
                 for c in ifaces:
-                    lines.append(f"  {c['name']:30s} {c['file']}")
+                    lines.append(f"  {c['name']:30s} {tag(c['file'])}")
             result = trunc("\n".join(lines), 3000)
 
     elif name == "project_config":
@@ -581,17 +647,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 lines.append(f"  {k:20s} {v}")
         be = deps.get("backend", {})
         if be.get("framework"):
-            lines.append(f"\n🔧 后端：{be['framework']}")
+            lines.append(f"\n🔧 后端 (C#)：{be['framework']}")
             if be.get("packages"):
                 lines.append(f"  包: {', '.join(be['packages'][:8])}")
         tauri = deps.get("tauri", {})
         if tauri:
-            lines.append(f"\n🦀 Tauri 依赖：")
+            lines.append(f"\n🦀 Tauri (Rust)：")
             for k, v in list(tauri.items())[:8]:
                 lines.append(f"  {k:25s} {v}")
         fe = deps.get("frontend", {})
         if fe:
-            lines.append(f"\n⚛️ 前端依赖（{len(fe)} 个）：")
+            lines.append(f"\n⚛️ 前端 (TS/TSX)：{len(fe)} 个依赖")
             for k, v in list(fe.items())[:12]:
                 lines.append(f"  {k:25s} {v}")
         result = trunc("\n".join(lines), 3000)
@@ -604,7 +670,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             lines = [f"🦀 共 {len(cmds)} 个 Tauri command：", ""]
             for c in cmds:
-                lines.append(f"  {c['name']:30s} {c['file']}")
+                lines.append(f"  {c['name']:30s} {tag(c['file'])}")
             result = trunc("\n".join(lines), 2000)
 
     elif name == "tauri_capabilities":
@@ -615,7 +681,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             lines = [f"🔐 共 {len(caps)} 个能力文件：", ""]
             for c in caps:
                 perms = c.get("permissions", [])
-                lines.append(f"  {c['file']}  ({len(perms)} permissions)")
+                lines.append(f"  {tag(c['file'])}  ({len(perms)} permissions)")
                 for p in perms[:8]:
                     lines.append(f"    - {p}")
                 if len(perms) > 8:
@@ -630,7 +696,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             lines = [f"🌐 共 {len(calls)} 个 API 调用：", ""]
             for c in sorted(calls, key=lambda x: x["file"])[:25]:
-                lines.append(f"  {c['call']:>8}  {c['url']:40s}  {c['file']}")
+                lines.append(f"  {c['call']:>8}  {c['url']:40s}  {tag(c['file'])}")
             if len(calls) > 25:
                 lines.append(f"  ... ({len(calls)} total)")
             result = trunc("\n".join(lines), 3000)
@@ -642,7 +708,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             lines = [f"🗄️ 共 {len(stores)} 个 store/state：", ""]
             for s in stores:
-                lines.append(f"  {s['name']:30s} {s['file']}")
+                lines.append(f"  {s['name']:30s} {tag(s['file'])}")
             result = trunc("\n".join(lines), 2000)
 
     elif name == "hooks":
@@ -652,8 +718,30 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             lines = [f"🪝 共 {len(hooks)} 个 Hook：", ""]
             for h in hooks:
-                lines.append(f"  {h['name']:30s} {h['file']}")
+                lines.append(f"  {h['name']:30s} {tag(h['file'])}")
             result = trunc("\n".join(lines), 2000)
+
+    elif name == "code_context":
+        path_arg = arguments.get("path", "")
+        if not path_arg:
+            result = "❌ 需要 path 参数：文件相对路径"
+        else:
+            ctx = _extract_code_context(path_arg)
+            if "error" in ctx:
+                result = f"❌ {ctx['error']}"
+            else:
+                lines = [
+                    f"📄 {ctx['file']}",
+                    f"  语言: {ctx['language']}  |  层: {ctx['layer']}  |  {ctx['size']}",
+                ]
+                for key in ('definitions', 'exports', 'imports', 'tauri_commands', 'endpoints'):
+                    vals = ctx.get(key)
+                    if vals:
+                        label = {'definitions': '定义', 'exports': '导出', 'imports': '导入',
+                                 'tauri_commands': 'Tauri command', 'endpoints': '端点'}.get(key, key)
+                        lines.append(f"  {label}: {', '.join(vals[:8])}")
+                        if len(vals) > 8: lines[-1] += " ..."
+                result = "\n".join(lines)
 
     else:
         result = f"❌ 未知工具：{name}"
