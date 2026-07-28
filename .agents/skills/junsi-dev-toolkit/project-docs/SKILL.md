@@ -1,41 +1,40 @@
 ---
 name: project-docs
-description: 项目知识中枢。通过 MCP Server 统一管理所有项目文档。触发词：文档、规范、ADR、架构、设计、UI、控件、组件、调用规范、系统设计、决策记录、整理文档、生成文档。
+description: 项目知识中枢。通过 MCP Server 统一管理项目文档 + 提供代码感知分析。触发词：文档、规范、ADR、架构、设计、API、组件、项目结构、端点、路由。
 ---
 
-# 项目知识中枢（Project Docs MCP 路由层）
+# 项目知识中枢（Project Docs MCP）
 
 ## 概述
 
-本项目知识中枢基于 **MCP (Model Context Protocol)** 实现，所有文档操作通过 MCP Server 执行。
+MCP Server 提供两类能力：
+1. **文档管理**：查询、创建 ADR、更新、整理、生成文档
+2. **代码感知**：项目树、API 端点、前端路由、组件清单、配置摘要
 
-## 工作流
+## 路由规则
 
-### 1. 路由用户请求到 MCP 工具
+| 用户意图 | 调用的 MCP 工具 |
+|---------|----------------|
+| 查询文档 | `query_docs` |
+| 创建 ADR | `create_adr` |
+| 更新/创建文档 | `update_doc` |
+| 整理散落文档 | `organize_docs` |
+| 生成专题文档 | `generate_docs` |
+| 看项目结构 | `project_tree` |
+| 看后端 API | `api_endpoints` |
+| 看前端路由 | `frontend_routes` |
+| 看组件清单 | `component_inventory` |
+| 看配置摘要 | `project_config` |
+| 看 Tauri command | `tauri_commands` |
+| 看 Tauri 权限 | `tauri_capabilities` |
+| 看前端 API 调用 | `api_client` |
+| 看状态管理 | `stores` |
+| 看自定义 Hook | `hooks` |
 
-| 用户意图 | 调用的 MCP 工具 | 说明 |
-|:---|:---|:---|
-| 查询文档 | `query_docs` | 搜索并返回匹配的文档 |
-| 创建 ADR | `create_adr` | 创建架构决策记录 |
-| 更新文档 | `update_doc` | 更新现有文档 |
-| 整理文档 | `organize_docs` | 扫描并归类散落文档 |
-| 生成专题文档 | `generate_docs` | 生成任意类型的专题文档（如启动流程、联机流程），AI 先分析代码再生成 |
+## 在 junsi-dev-toolkit 中的使用
 
-### 2. MCP 调用方式
+根路由的 MCP 子代理调度会调用 `query_docs` 查询项目知识，并自动带出代码感知工具的上下文（端点、路由、组件等），注入给子技能。
 
-所有操作通过 MCP 协议调用 `project-docs` Server：
+## 错误处理
 
-```
-调用 MCP 工具：project-docs.[tool_name]
-参数：[根据工具定义的参数]
-```
-
-### 3. Plan 模式检测
-
-同 junsi-dev-toolkit 统一规则。
-
-### 4. 错误处理
-
-如果 MCP Server 未响应：
-- 提示用户："⚠️ MCP Server `project-docs` 不可用。请检查：1) MCP 配置是否正确 2) Python 环境是否就绪 3) 依赖是否已安装"
-- 降级方案：可手动在 `docs/junsi-dev-docs/` 下操作，但建议先修复 MCP 连接。
+MCP Server 不可用时提示用户检查 Python 环境和 MCP 配置，不阻塞任务。
