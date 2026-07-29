@@ -1,109 +1,18 @@
 ---
 name: junsi-dev-toolkit
-description: 开发任务工具包。根据用户意图自动路由到专用子工具：移植代码 (code-migrater)、修复Bug (diagnose-before-fix)、添加新功能 (requirements-driven-dev)、文档管理 (project-docs)、上下文记忆 (memory-skill)。当用户提出开发需求时触发。
+description: 开发任务工具包。根据用户意图自动路由到专用子工具：移植代码 (code-migrater)、修复Bug (diagnose-before-fix)、添加新功能 (requirements-driven-dev)、文档管理 (project-docs)、上下文记忆 (memory-skill)。路由逻辑见 opencode.md。
 ---
 
-# Junsi 开发工具包
+# Junsi Dev Toolkit
 
-开发任务总入口。路由到最合适的专用子工具。
+路由表和 MCP 定范围逻辑已集成到 `opencode.md`，始终生效，无需 `/skill` 调用。
 
-**遵守项目规范**：本技能不覆盖 AGENTS.md、opencode.md、CLAUDE.md 中的硬性要求，执行时必须同时遵守。
+本目录下是各子技能的详细实现文件，路由后按需读取：
 
-**及时更新文档**：任务完成后，若涉及架构/API/模块/UI 变更，需更新 `docs/` 或 `AGENTS.md`。
-
-## 路由表（唯一门禁）
-
-| 优先级 | 意图 | 路由 |
-|--------|------|------|
-| 最高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |
-| 次高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |
-| 中高 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |
-| 中 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |
-| 最低 | 添加/新增/实现/加个一个新功能/页面/接口/组件 | `requirements-driven-dev` |
-
-同时匹配多项 → 取优先级最高者。纯知识问答不触发任何子工具。
-
-## MCP 定范围（强制）— 先定边界，再精细解析
-
-路由前直接调用 MCP 工具，输出**范围定义**（不读文件全文，不定全貌）。MCP 不可用时提示后继续，不阻塞任务。
-
-### 范围定义格式
-
-```markdown
-📌 范围
-- 目录：{path1}, {path2}
-- 端点：{GET /api/xxx, POST /api/yyy}
-- 组件：{ComponentA, ComponentB}
-- 文件：{file1.tsx, file2.cs}
-- 模块：{ModuleA, ModuleB}
-- 约束：{关键约束点}
-```
-
-`memory-skill` 和 `project-docs` 不需要定范围。
-
-### 按任务选择工具
-
-| 路由目标 | MCP 工具 | 输出范围示例 |
-|---------|---------|-------------|
-| `code-migrater` | `project_tree` + `project_config` + `code_context`(关键文件) | 目录清单 + 依赖列表 + 关键文件结构 |
-| `diagnose-before-fix` | `project_tree` + 按报错位置选: `api_endpoints` / `frontend_routes` / `tauri_commands` / `hooks` / `stores` | 错误所在目录 + 相关端点/组件 |
-| `requirements-driven-dev` | `project_tree` + `project_config` + `api_endpoints` + `frontend_routes` + `component_inventory` | 类似功能目录 + 可复用组件/API 模式 |
-
-### 子 skill 使用规则
-
-范围注入后转发给子 skill。子 skill **只在范围内精细解析**，不得全项目扫描。使用子代理并行时，每个子代理的检索范围也必须限定在范围内。
-
-## 工作流
-
-```
-HANDOFF 恢复(自动) → 路由宣告 → MCP 定范围(输出范围定义) → 转发子技能
-  → 子技能(只在范围内精细解析) → 更新文档(强制) → 保存进度(自动)
-
-降智/上下文将满 → prepare-handoff → 提示用户开新会话
-```
-
-### 路由宣告格式
-
-```markdown
-## 路由宣告
-- 意图：[移植 / 修复Bug / 新功能 / 文档]
-- 匹配：[关键词]
-- 路由到：`./[子工具]/SKILL.md`
-- MCP 范围：[已注入 / 不可用]
-```
-
-### 更新文档清单（任务完成后检查）
-
-- [ ] 新增/修改 API → 更新 `docs/API规范/`
-- [ ] 新增/修改 模块 → 更新 `docs/架构设计/`
-- [ ] 新增/修改 UI 组件 → 更新 `docs/UI设计/`
-- [ ] 新增/修改 架构决策 → 创建/更新 ADR
-- [ ] 新增/修改 构建/运行命令 → 更新 `AGENTS.md`
-- [ ] 新增/修改 依赖 → 更新 `AGENTS.md`
-
-## 子工具
-
-| 子工具 | 触发条件 |
-|--------|----------|
-| `code-migrater` | 移植/迁移任务 |
-| `diagnose-before-fix` | Bug 修复 |
-| `requirements-driven-dev` | 新功能开发 |
-| `project-docs` | 文档操作 |
-| `memory-skill` | 决策记忆/进度保存/跨会话恢复 |
-
-## 违规范例
-
-以下行为将被视为**未遵循本工具包指令**：
-
-- 不澄清/不枚举原因直接写代码
-- 用户提了意见直接改，不更新方案、不等确认
-- 验证时说"通过"但不粘贴实际命令输出
-- 改代码前不做 checkpoint
-- 编译通过就当完事，不实际运行验证
-- 改完不更新 docs/ 或 AGENTS.md
-
-## 禁止
-
-- 路由器不得自行修业务代码
-- 路由器不得绕过子工具直接输出结果
-- 多任务同时命中时不得并行执行
+| 子工具 | 文件 |
+|--------|------|
+| `code-migrater` | `./code-migrater/SKILL.md` |
+| `diagnose-before-fix` | `./diagnose-before-fix/SKILL.md` |
+| `requirements-driven-dev` | `./requirements-driven-dev/SKILL.md` |
+| `project-docs` | `./project-docs/SKILL.md` |
+| `memory-skill` | `./memory-skill/SKILL.md` |
