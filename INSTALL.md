@@ -1,72 +1,59 @@
 # 安装指南
 
-## 1. 克隆仓库
+## OpenCode（推荐 — Plugin）
+
+`opencode.jsonc` 的 `plugin` 数组添加：
+
+```json
+"junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"
+```
+
+或使用本地克隆路径：
+
+```json
+"E:/my-skill"
+```
+
+重启 OpenCode。路由自动生效，无需 `/skill` 调用。
+
+## 其他 AI 工具（Cursor / Claude Code / Codex）
+
+### 1. 克隆仓库
 
 ```bash
 git clone git@github.com:TheMyceliumOfAntan/junsi-dev-toolkit.git
-cd junsi-dev-toolkit
 ```
 
-## 2. 安装 Skill 文件
-
-将 `.agents/skills/junsi-dev-toolkit/` 复制到用户的 skills 目录：
+### 2. 安装 Skill 文件
 
 ```bash
-cp -r .agents/skills/junsi-dev-toolkit ~/.agents/skills/junsi-dev-toolkit
+cp -r junsi-dev-toolkit/.agents/skills/junsi-dev-toolkit ~/.agents/skills/junsi-dev-toolkit
 ```
 
-或者运行安装脚本：
+或运行 `./install.sh`。
 
-```bash
-./install.sh
-```
-
-## 3. 安装 MCP Server 依赖
+### 3. 安装 MCP Server 依赖
 
 ```bash
 pip install mcp pydantic
 ```
 
-## 4. 注册 MCP Server
-
-### opencode
-
-在 `~/.config/opencode/opencode.jsonc` 的 `mcp` 字段中添加：
-
-```json
-"project-docs": {
-  "type": "local",
-  "command": ["python", "~/.agents/skills/junsi-dev-toolkit/project-docs/mcp-server.py"],
-  "enabled": true
-}
-```
-
-### Cursor / Claude
-
-在 MCP 配置文件中添加：
+### 4. 注册 MCP Server
 
 ```json
 {
   "mcpServers": {
     "project-docs": {
       "command": "python",
-      "args": ["${workspaceFolder}/.agents/skills/junsi-dev-toolkit/project-docs/mcp-server.py"],
+      "args": ["~/.agents/skills/junsi-dev-toolkit/project-docs/mcp-server.py"],
       "env": { "PYTHONUNBUFFERED": "1" }
     }
   }
 }
 ```
 
-## 5. 初始化文档目录
-
-```bash
-mkdir -p docs/junsi-dev-docs
-```
-
-## 6. 重启 AI 工具
-
-重启 opencode / Cursor / Claude，MCP Server 会自动连接。
+### 5. 重启 AI 工具
 
 ## 验证
 
-对 AI 说 "帮我查一下项目文档"，如果 AI 调用 `project-docs` MCP 工具并返回结果，说明安装成功。
+对 AI 说"帮我查一下项目文档"或"加个功能"，如果能自动路由到对应子技能，说明安装成功。
