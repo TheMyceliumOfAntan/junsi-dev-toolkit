@@ -13,7 +13,7 @@ description: Use when the user requests code migration, porting, or translation 
 
 ### Gate 0：可行性门禁
 
-0. **MCP 范围探测（强制）**：直接调用 `project_tree` + `project_config` + `code_context`(关键文件) 了解源/目标项目结构和依赖。不加 `task()` 包装。
+0. **在路由层注入的范围内解析源/目标项目**，不扫全文。
 1. 扫描源项目依赖 + 代码量
 2. 若存在目标项目无法替代的中间件/SDK，或 >5000 行 → 输出风险评估报告，等用户说"继续"
 3. ≤5000 行且无不替代依赖 → 直接进入阶段一

@@ -9,7 +9,7 @@ description: Use when the user wants to add a new feature or implement a new req
 
 ## Phase 1: CLARIFY
 
-- **MCP 范围探测（强制）**：直接调用 `project_tree` + `project_config` + `api_endpoints` + `frontend_routes` + `component_inventory` 了解现有架构，然后提方案。不加 `task()` 包装，不用于代理扫全文。
+- **依据 MCP 范围精细解析**：在路由层注入的范围内读代码、分析模式，不扫全文。提方案前先理解范围内现有实现。
 - 复述意图
 - 读相关代码后再提问（不读代码就提问是浅的）
 - 逐个澄清至零模糊：范围、行为、约束、优先级
@@ -30,6 +30,8 @@ description: Use when the user wants to add a new feature or implement a new req
 1. 原子包 ≥3
 2. 无文件级依赖（不读写同一个文件）
 3. 纯新增代码（不修改已有复杂逻辑）
+
+每个 Subagent 的检索范围**限定在路由层注入的范围内**，不得全项目扫描。
 
 主控为每个原子包启动一个 CodeGen Subagent，并行上限 3，全部返回后统一 build。
 

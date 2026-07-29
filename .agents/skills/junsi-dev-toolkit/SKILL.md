@@ -23,23 +23,41 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 
 同时匹配多项 → 取优先级最高者。纯知识问答不触发任何子工具。
 
-## MCP 预检（强制，直接调用，不用子代理）
+## MCP 定范围（强制）— 先定边界，再精细解析
 
-路由前**直接调用** MCP 工具获取项目上下文（不加 `task()` 包装），按任务类型选择工具：
+路由前直接调用 MCP 工具，输出**范围定义**（不读文件全文，不定全貌）。MCP 不可用时提示后继续，不阻塞任务。
 
-| 路由目标 | MCP 预检工具 | 目的 |
-|---------|-------------|------|
-| `code-migrater` | `project_tree` + `project_config` + `code_context`(关键文件) | 理解源/目标项目结构和依赖 |
-| `diagnose-before-fix` | `project_tree` + 按报错位置选: `api_endpoints` / `frontend_routes` / `tauri_commands` / `hooks` / `stores` | 定位问题域 |
-| `requirements-driven-dev` | `project_tree` + `project_config` + `api_endpoints` + `frontend_routes` + `component_inventory` | 了解现有架构，规划新增位置 |
+### 范围定义格式
 
-`memory-skill` 和 `project-docs` 不需要预检。MCP 不可用时提示后继续，不阻塞任务。
+```markdown
+📌 范围
+- 目录：{path1}, {path2}
+- 端点：{GET /api/xxx, POST /api/yyy}
+- 组件：{ComponentA, ComponentB}
+- 文件：{file1.tsx, file2.cs}
+- 模块：{ModuleA, ModuleB}
+- 约束：{关键约束点}
+```
+
+`memory-skill` 和 `project-docs` 不需要定范围。
+
+### 按任务选择工具
+
+| 路由目标 | MCP 工具 | 输出范围示例 |
+|---------|---------|-------------|
+| `code-migrater` | `project_tree` + `project_config` + `code_context`(关键文件) | 目录清单 + 依赖列表 + 关键文件结构 |
+| `diagnose-before-fix` | `project_tree` + 按报错位置选: `api_endpoints` / `frontend_routes` / `tauri_commands` / `hooks` / `stores` | 错误所在目录 + 相关端点/组件 |
+| `requirements-driven-dev` | `project_tree` + `project_config` + `api_endpoints` + `frontend_routes` + `component_inventory` | 类似功能目录 + 可复用组件/API 模式 |
+
+### 子 skill 使用规则
+
+范围注入后转发给子 skill。子 skill **只在范围内精细解析**，不得全项目扫描。使用子代理并行时，每个子代理的检索范围也必须限定在范围内。
 
 ## 工作流
 
 ```
-HANDOFF 恢复(自动) → 路由宣告 → MCP 预检(直接调用，免子代理) → 转发子技能
-  → 子技能执行 → 更新文档(强制) → 保存进度(自动)
+HANDOFF 恢复(自动) → 路由宣告 → MCP 定范围(输出范围定义) → 转发子技能
+  → 子技能(只在范围内精细解析) → 更新文档(强制) → 保存进度(自动)
 
 降智/上下文将满 → prepare-handoff → 提示用户开新会话
 ```
@@ -51,7 +69,7 @@ HANDOFF 恢复(自动) → 路由宣告 → MCP 预检(直接调用，免子代�
 - 意图：[移植 / 修复Bug / 新功能 / 文档]
 - 匹配：[关键词]
 - 路由到：`./[子工具]/SKILL.md`
-- MCP 预检：[已注入 / 不可用]
+- MCP 范围：[已注入 / 不可用]
 ```
 
 ### 更新文档清单（任务完成后检查）
