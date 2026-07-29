@@ -9,6 +9,7 @@ description: Use when the user wants to add a new feature or implement a new req
 
 ## Phase 1: CLARIFY
 
+- **MCP 范围探测（强制）**：直接调用 `project_tree` + `project_config` + `api_endpoints` + `frontend_routes` + `component_inventory` 了解现有架构，然后提方案。不加 `task()` 包装，不用于代理扫全文。
 - 复述意图
 - 读相关代码后再提问（不读代码就提问是浅的）
 - 逐个澄清至零模糊：范围、行为、约束、优先级

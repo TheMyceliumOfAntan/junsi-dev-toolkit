@@ -10,7 +10,7 @@ description: >-
 
 ## 流程（8 步，顺序执行）
 
-1. **理解问题** — 读错误/日志/堆栈，读相关代码，`git log --oneline -20` 查近期改动。此阶段不写代码。
+1. **理解问题** — **MCP 范围探测（强制）**：直接调用 `project_tree` + 按报错位置选 `api_endpoints`/`frontend_routes`/`tauri_commands`/`hooks`/`stores`。不加 `task()` 包装。再读错误/日志/堆栈，读相关代码，`git log --oneline -20` 查近期改动。此阶段不写代码。
 2. **枚举原因** — ≥2 个具体原因，每个引用代码位置。对比同类正常代码找差异。
 3. **问方向** — 呈现原因，**用户确认后才改**。问+改在同一回复 = 没问。
 4. **修复** — 改前先 `git stash` 或 `git commit -m "checkpoint:..."`。一次只改一个因素，改完 build 再改下一个。
