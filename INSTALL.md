@@ -11,12 +11,12 @@ cd junsi-dev-toolkit
 
 将 `.agents/skills/junsi-dev-toolkit/` 复制到用户的 skills 目录：
 
-**Windows / Linux / Mac（通用）**：
 ```bash
 cp -r .agents/skills/junsi-dev-toolkit ~/.agents/skills/junsi-dev-toolkit
 ```
 
 或者运行安装脚本：
+
 ```bash
 ./install.sh
 ```
@@ -69,4 +69,4 @@ mkdir -p docs/junsi-dev-docs
 
 ## 验证
 
-对 AI 说："帮我查一下项目文档"，如果 AI 调用 `project-docs` MCP 工具并返回结果，说明安装成功。
+对 AI 说 "帮我查一下项目文档"，如果 AI 调用 `project-docs` MCP 工具并返回结果，说明安装成功。
