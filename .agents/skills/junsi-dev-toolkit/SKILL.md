@@ -1,6 +1,6 @@
 ---
 name: junsi-dev-toolkit
-description: 开发任务工具包。根据用户意图自动路由到专用子工具：移植代码 (code-migrater)、修复Bug (diagnose-before-fix)、添加新功能 (requirements-driven-dev)、文档管理 (project-docs)。当用户提出开发需求时触发。
+description: 开发任务工具包。根据用户意图自动路由到专用子工具：移植代码 (code-migrater)、修复Bug (diagnose-before-fix)、添加新功能 (requirements-driven-dev)、文档管理 (project-docs)、上下文记忆 (memory-skill)。当用户提出开发需求时触发。
 ---
 
 # Junsi 开发工具包
@@ -17,6 +17,7 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 |--------|------|------|
 | 最高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |
 | 次高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |
+| 中高 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |
 | 中 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |
 | 最低 | 添加/新增/实现/加个一个新功能/页面/接口/组件 | `requirements-driven-dev` |
 
@@ -41,7 +42,10 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 ## 工作流
 
 ```
-路由宣告 → MCP 子代理查文档(强制) → 转发子技能 → 子技能执行 → 更新文档(强制)
+HANDOFF 恢复(自动) → 路由宣告 → MCP 子代理查文档(强制) → 转发子技能
+  → 子技能执行 → 更新文档(强制) → 保存进度(自动)
+
+降智/上下文将满 → prepare-handoff → 提示用户开新会话
 ```
 
 ### 路由宣告格式
@@ -71,6 +75,7 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 | `diagnose-before-fix` | Bug 修复 |
 | `requirements-driven-dev` | 新功能开发 |
 | `project-docs` | 文档操作 |
+| `memory-skill` | 决策记忆/进度保存/跨会话恢复 |
 
 ## 违规范例
 

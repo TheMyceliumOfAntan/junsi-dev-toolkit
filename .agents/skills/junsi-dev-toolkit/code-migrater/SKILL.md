@@ -29,6 +29,7 @@ description: Use when the user requests code migration, porting, or translation 
 1. 分析源项目核心逻辑、数据流转
 2. 向用户呈现分析 + 冲突矩阵，**等确认后才继续**
 3. 确定移植方向：逐字翻译 / 适配新架构 / 混合模式
+4. **方向确认后** → 自动 `store-decision`，记录移植策略和冲突取舍
 
 ### 阶段三：准备
 
@@ -58,6 +59,7 @@ description: Use when the user requests code migration, porting, or translation 
 
 1. 所有测试通过后合并回 main
 2. **输出 ADR**（含：关键映射决策、遗留技术债记录）
+3. **完成后** → 自动 `save-progress`
 
 ## 相关子代理
 
@@ -66,6 +68,10 @@ description: Use when the user requests code migration, porting, or translation 
 | `subagents/translator/SKILL.md` | 逐文件翻译 |
 | `subagents/qa/SKILL.md` | 快照比对 |
 | `subagents/diagnose/SKILL.md` | 诊断修复 |
+
+## Memory 集成
+
+- **感觉到降智/上下文将满** → 自动 `prepare-handoff` → 提示用户开新会话后继续
 
 ## 禁止
 

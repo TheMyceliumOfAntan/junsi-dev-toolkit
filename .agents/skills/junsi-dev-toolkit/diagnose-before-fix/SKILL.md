@@ -28,3 +28,9 @@ description: >-
 - [ ] 文档/AGENTS.md 已更新（如需要）
 
 缺任何一项不得说"修好了"。
+
+## Memory 集成
+
+- **根因确认后** → 自动 `store-decision`，记录原因、修复方案和验证方法
+- **完成复测后** → 自动 `save-progress`
+- **感觉到降智/上下文将满** → 自动 `prepare-handoff` → 提示用户开新会话后继续

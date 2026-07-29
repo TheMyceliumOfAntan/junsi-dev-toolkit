@@ -15,6 +15,7 @@ description: Use when the user wants to add a new feature or implement a new req
 - **涉及 UI 时**：先用 ASCII/Mermaid 画示意图，确认布局后再讨论实现（避免反复改浪费 token）
 - 提 ≥2 种方案（含优缺点），用户确认后才写代码
 - **用户提意见时**：先更新方案、问确认，再改代码。不得直接改。
+- **方案确认后**：自动执行 `store-decision`，记录选型理由和舍弃方案。
 
 ## Phase 2: IMPLEMENT
 
@@ -43,3 +44,8 @@ description: Use when the user wants to add a new feature or implement a new req
 - [ ] docs/ 或 AGENTS.md 已更新
 
 缺任何一项不得说"做完了"。
+
+## Memory 集成
+
+- **VERIFY 通过后** → 自动 `save-progress`
+- **感觉到降智/上下文将满** → 自动 `prepare-handoff` → 提示用户开新会话后继续
