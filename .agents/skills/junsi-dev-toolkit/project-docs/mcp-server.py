@@ -226,9 +226,9 @@ def _extract_endpoints() -> List[Dict[str, str]]:
     http_methods_java = r'Get|Post|Put|Delete|Patch'                        # Java PascalCase: GetMapping
     patterns = [
         # Minimal API: app.MapGet / group.MapPost
-        (rf'(?:app|group)\.Map{http_methods_cs}\("([^"]+)"', 'minimal'),
+        (rf'(?:app|group)\.Map({http_methods_cs})\("([^"]+)"', 'minimal'),
         # C# controller: [HttpGet], [HttpPost("path")]
-        (rf'\[Http{http_methods_cs}\("?([^")\]]*)"?\)?\]', 'controller'),
+        (rf'\[Http({http_methods_cs})\("?([^")\]]*)"?\)?\]', 'controller'),
         # Spring Boot: @GetMapping("/path"), @PostMapping("/path")
         (rf'@({http_methods_java})Mapping\("([^"]*)"\)', 'spring-boot'),
         # Spring Boot: @RequestMapping("/path") (all HTTP methods)
