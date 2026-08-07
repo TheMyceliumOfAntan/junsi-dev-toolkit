@@ -44,11 +44,14 @@ description: Use when the user wants to add a new feature or implement a new req
 - [ ] 提议测试场景并验证（正常/边界/异常）
 - [ ] 影响分析：搜索调用方，确认无下游破坏
 - [ ] 意图匹配：逐条对比 Phase 1 澄清与最终结果
-- [ ] docs/ 或 AGENTS.md 已更新
+- [ ] 方案确认后必须调用 `store-decision`（记录选型理由和舍弃方案）
+- [ ] 涉及 API/架构/UI 变更必须调用 project-docs 的 `update_doc`/`create_adr`，禁止自己乱写文档
+- [ ] 全部通过后必须调用 `save-progress`
 
 缺任何一项不得说"做完了"。
 
 ## Memory 集成
 
-- **VERIFY 通过后** → 自动 `save-progress`
-- **感觉到降智/上下文将满** → 自动 `prepare-handoff` → 提示用户开新会话后继续
+- **方案确认后** → **必须**调用 `store-decision`，记录选型理由和舍弃方案
+- **VERIFY 通过后** → **必须**调用 `save-progress`
+- **感觉到降智/上下文将满** → 调用 `prepare-handoff` → 提示用户开新会话后继续

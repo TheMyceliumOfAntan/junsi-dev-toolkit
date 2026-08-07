@@ -9,6 +9,8 @@ description: Use when the user requests code migration, porting, or translation 
 
 **遇任何错误用 `diagnose-before-fix` 排查**，禁止凭感觉改。
 
+> **流程提示**：本技能全文由插件在路由时注入。按本流程执行，并在每个阶段完成后更新 `MAPPING_TABLE.yaml` 与 `CHECKPOINT_BATCH_{n}.md`，否则视为未完成。
+
 ## 工作流
 
 ### Gate 0：可行性门禁
@@ -30,7 +32,7 @@ description: Use when the user requests code migration, porting, or translation 
 1. 分析源项目核心逻辑、数据流转
 2. 向用户呈现分析 + 冲突矩阵，**等确认后才继续**
 3. 确定移植方向：逐字翻译 / 适配新架构 / 混合模式
-4. **方向确认后** → 自动 `store-decision`，记录移植策略和冲突取舍
+4. **方向确认后** → **必须**调用 `store-decision`，记录移植策略和冲突取舍
 
 ### 阶段三：准备
 
@@ -59,8 +61,8 @@ description: Use when the user requests code migration, porting, or translation 
 ### 阶段六：合并 + ADR
 
 1. 所有测试通过后合并回 main
-2. **输出 ADR**（含：关键映射决策、遗留技术债记录）
-3. **完成后** → 自动 `save-progress`
+2. **必须输出 ADR**（含：关键映射决策、遗留技术债记录）——用 project-docs 的 `create_adr`，禁止自己乱写文档
+3. **完成后必须** → 调用 `save-progress` 和 `store-decision`（记录映射策略和冲突取舍）
 
 ## 相关子代理
 
@@ -72,7 +74,17 @@ description: Use when the user requests code migration, porting, or translation 
 
 ## Memory 集成
 
-- **感觉到降智/上下文将满** → 自动 `prepare-handoff` → 提示用户开新会话后继续
+- **方向确认后** → **必须**调用 `store-decision`，记录移植策略和冲突取舍
+- **感觉到降智/上下文将满** → 调用 `prepare-handoff` → 提示用户开新会话后继续
+
+## 完成清单（全部为必须项，缺一项不得说"移植完成"）
+
+- [ ] 阶段二方向确认后已 `store-decision`
+- [ ] MAPPING_TABLE.yaml 已生成并更新
+- [ ] 每批有 CHECKPOINT_BATCH_{n}.md + git commit
+- [ ] QA 快照比对通过（粘贴输出）
+- [ ] ADR 已用 `create_adr` 输出
+- [ ] 完成后已 `save-progress`
 
 ## 禁止
 

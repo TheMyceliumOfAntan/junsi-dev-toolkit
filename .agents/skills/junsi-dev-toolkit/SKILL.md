@@ -1,23 +1,32 @@
 ---
 name: junsi-dev-toolkit
-description: 开发任务工具包。根据用户意图自动路由到专用子工具：移植代码 (code-migrater)、修复Bug (diagnose-before-fix)、添加新功能 (requirements-driven-dev)、文档管理 (project-docs)、上下文记忆 (memory-skill)。路由表由 OpenCode Plugin 自动注入，始终生效。
+description: 开发任务工具包。根据用户意图自动路由到专用子工具：移植代码 (code-migrater)、修复Bug (diagnose-before-fix)、添加新功能 (requirements-driven-dev)、文档管理 (project-docs)、上下文记忆 (memory-skill)。路由由 OpenCode Plugin 代码级匹配并注入精简指令，本文件为兜底路由表。
 ---
 
 # 开发任务路由（junsi-dev-toolkit Plugin）
 
 所有开发任务先按路由表匹配，**无需 `/skill` 调用**。路由后读对应的子技能文件获取详细步骤。
 
+> **v2.1 机制**：插件 `junsi-dev-toolkit.js` 用关键词正则对用户消息做代码级路由，命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告（`📌 路由宣告: {id}`）+ 强制完成清单；纯问答零注入。若注入缺失或意图复杂，按下表自行路由（LLM 兜底），并同样输出路由宣告。
+
 ## 路由表
 
 | 优先级 | 用户意图 | 路由到 |
 |--------|---------|--------|
-| 最高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |
-| 次高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |
-| 中高 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |
-| 中 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |
-| 最低 | 添加/新增/实现/加个一个新功能/页面/接口/组件 | `requirements-driven-dev` |
+| 最高 | 集群/多agent/并行分工/多模型 | `cluster` |
+| 次高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |
+| 中高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |
+| 中 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |
+| 中低 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |
+| 最低 | 添加/新增/实现/优化/重构/改进/加个新功能/页面/接口/组件 | `requirements-driven-dev` |
 
 纯知识问答不触发路由。同时匹配多项取优先级最高。
+
+## Cluster 模式
+
+多 Agent 集群：主 Agent（`cluster`，primary 模式，Tab 切换）总体规划 → 动态检测本机可用模型（`cluster-scan-models`）→ 生成分配方案（`cluster-allocation`）→ **question 工具问用户确认** → 派发给 5 个专精 subagent（`cluster-planner`/`cluster-frontend`/`cluster-backend`/`cluster-qa`/`cluster-docs`）→ 汇总验证。
+
+- subagent 模型按本机可用性动态注入（无 key 自动降级回退），详见 `./cluster/SKILL.md`
 
 ## 工作流
 
@@ -26,7 +35,9 @@ HANDOFF恢复(自动) → 路由宣告 → MCP定范围(直接调MCP工具)
   → 读子技能SKILL.md → 执行 → 更新文档 → 保存进度
 ```
 
-降智/上下文将满 → 生成 HANDOFF → 提示开新会话
+- **HANDOFF 恢复**：新会话插件检测 `.memory/HANDOFF.md`，自动注入恢复指令，先调 `restore-handoff` 工具。
+- 降智/上下文将满 → 生成 HANDOFF（调 `prepare-handoff` 工具）→ 提示开新会话。
+- 上下文压缩时插件自动注入 `.memory` 摘要。
 
 ## MCP 定范围
 
@@ -52,10 +63,26 @@ HANDOFF恢复(自动) → 路由宣告 → MCP定范围(直接调MCP工具)
 
 子技能和子代理**只在范围内精细解析**，不扫全文。
 
+## Memory 工具（插件注册，直接调用）
+
+| 工具 | 触发时机 |
+|------|---------|
+| `store-decision` | **必须**：阶段确认后 / 用户说"记住、记录、方案确认" |
+| `save-progress` | **必须**：VERIFY 通过后 / 用户说"保存进度" |
+| `prepare-handoff` | 降智/上下文将满/用户说"换会话" |
+| `restore-handoff` | 新会话检测到 HANDOFF / 用户说"恢复进度" |
+
+工具不可用（依赖未装）时按 `memory-skill/SKILL.md` 约定格式手工写 `.memory/` 文件。
+
+## 文档强制规则
+
+涉及 API、架构、UI、行为变更 → **必须**调用 project-docs 的 `update_doc`/`create_adr`，禁止自己乱写文档。各子技能完成清单已含此强制项，缺一项不得宣称完成。
+
 ## 子技能文件（路由后读取详细步骤）
 
 | 子工具 | 文件 |
 |--------|------|
+| `cluster` | `./cluster/SKILL.md` |
 | `code-migrater` | `./code-migrater/SKILL.md` |
 | `diagnose-before-fix` | `./diagnose-before-fix/SKILL.md` |
 | `requirements-driven-dev` | `./requirements-driven-dev/SKILL.md` |
@@ -72,3 +99,4 @@ HANDOFF恢复(自动) → 路由宣告 → MCP定范围(直接调MCP工具)
 - 不澄清/不枚举原因直接写代码 / 用户提意见不等确认直接改
 - 验证时说"通过"但不粘贴命令输出
 - 改代码前不做 checkpoint / 编译通过就当完事 / 改完不更新文档
+- 用 PowerShell `Set-Content`/`-replace` 改源码（破坏 UTF-8 编码，见 `shared/ai-compliance.md` 文件编辑禁忌）

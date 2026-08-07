@@ -10,9 +10,7 @@ description: >-
 
 ## 存储结构
 
-项目根 `.memory/` 目录，自动创建，**需手动 gitignore**：
-
-首次使用时检查项目 `.gitignore`，若没有 `.memory/` 则添加一行。避免 `.memory/` 被误提交。
+项目根 `.memory/` 目录，自动创建（插件工具负责创建并维护 `.gitignore`，无需手工操作）：
 
 | 文件 | 加载策略 | 大小 | 用途 |
 |------|----------|------|------|
@@ -24,14 +22,16 @@ description: >-
 
 ## 工具
 
+> **v2**：4 个工具由插件 `junsi-dev-toolkit.js` 注册为真实可调用工具（自动写文件、维护 INDEX 和 .gitignore），**优先调用工具**，不要手工写文件。若工具未注册（依赖缺失），按下方"工具调用格式约定"手工写入。
+
 | 工具 | 用户触发词 | 动作 |
 |------|-----------|------|
 | `store-decision` | 记住/记录/记一下/决定/方案确认 | 追加 `decisions/{timestamp}-{slug}.md` |
 | `save-progress` | 保存进度/做到哪了/记进度 | 更新 `progress/current.md` + 重写 `INDEX.md` |
 | `prepare-handoff` | 换会话/换窗口/上下文不够/降智/重开/clean slate | 生成完整 `HANDOFF.md` |
-| `restore-handoff` | 新会话自动（主路由检测） | 加载 `HANDOFF.md` 注入上下文 |
+| `restore-handoff` | 新会话自动（插件检测 HANDOFF 注入） | 加载 `HANDOFF.md` 注入上下文 |
 
-## 自动触发点（由主路由/子工具在关键点调用）
+## 自动触发点（由插件/主路由/子工具在关键点调用）
 
 - **工作流开始** → 检测 `.memory/HANDOFF.md`，存在则执行 `restore-handoff`
 - **阶段确认后**（CLARIFY phase 结束） → 自动 `store-decision`

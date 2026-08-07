@@ -1,9 +1,12 @@
 {
   "name": "junsi-dev-toolkit",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "开发任务自动路由工具包 — 代码移植、Bug修复、新功能开发、文档管理、任务记忆",
   "type": "module",
   "main": ".opencode/plugins/junsi-dev-toolkit.js",
   "keywords": ["skills", "workflow", "code-migration", "debugging", "memory"],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.13"
+  }
 }
