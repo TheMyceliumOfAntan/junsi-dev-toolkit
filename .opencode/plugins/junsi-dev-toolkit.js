@@ -396,6 +396,9 @@ const isMultimodalModel = (m) => {
   return true;
 };
 
+/* 套餐计费 provider（名字含 plan/token）：标注 cost=0 但实际扣套餐额度，不比按量便宜 */
+const isPlanBillingProvider = (provider) => /plan|token/i.test(provider);
+
 const scanAvailableModels = () => {
   const authed = detectAuthedProviders();
   const envOk = detectEnvProviders();
@@ -406,11 +409,13 @@ const scanAvailableModels = () => {
     for (const provider of available) {
       const meta = models[provider];
       if (!meta || !meta.models) continue;
+      const plan = isPlanBillingProvider(provider);
       result[provider] = Object.values(meta.models).map((m) => ({
         id: `${provider}/${m.id}`,
         name: m.name,
         family: m.family,
         cost: m.cost,
+        plan,
         context: m.limit && m.limit.context,
         multimodal: isMultimodalModel(m),
         reasoning: m.reasoning_options,
@@ -421,6 +426,13 @@ const scanAvailableModels = () => {
     for (const provider of available) result[provider] = [];
   }
   return result;
+};
+
+/* 真实成本估算：套餐计费视作"贵"（避免被当 $0 免费选），无成本信息视作未知 */
+const effectiveCost = (m) => {
+  if (!m || m.plan) return 9999;
+  if (m.cost && typeof m.cost.input === 'number') return m.cost.input;
+  return 999;
 };
 
 /* 根据模型声明的能力计算思考强度配置（agent.options 透传给 provider） */
@@ -481,15 +493,15 @@ const pickModel = (models, candidates, { preference = 'balanced', domain, multim
   if (inCandidates.length) pool = inCandidates;
   pool.sort((a, b) => {
     if (preference === 'performance') {
-      return lbScore(a.id, domain) - lbScore(b.id, domain);
+      const pa = effectiveCost(a) === 9999 ? 1 : 0;
+      const pb = effectiveCost(b) === 9999 ? 1 : 0;
+      return pb - pa || lbScore(a.id, domain) - lbScore(b.id, domain);
     }
     if (preference === 'cost') {
-      const ca = a.cost && a.cost.input ? a.cost.input : 999;
-      const cb = b.cost && b.cost.input ? b.cost.input : 999;
-      return ca - cb;
+      return effectiveCost(a) - effectiveCost(b);
     }
-    const sa = lbScore(a.id, domain) + (a.cost && a.cost.input ? a.cost.input * 10 : 0);
-    const sb = lbScore(b.id, domain) + (b.cost && b.cost.input ? b.cost.input * 10 : 0);
+    const sa = lbScore(a.id, domain) + effectiveCost(a) * 10;
+    const sb = lbScore(b.id, domain) + effectiveCost(b) * 10;
     return sa - sb;
   });
   return pool[0].id;
@@ -674,15 +686,16 @@ const registerClusterTools = async (tools, skillsDir) => {
     args: {},
     async execute(_args, _context) {
       const models = scanAvailableModels();
-      const lines = ['## 本机可用模型', '', '> ✅ = 多模态（可识图，前端/UI 校验用）｜ 单位 $/百万 token ｜ 思考: effort档位或 on/off', ''];
+      const lines = ['## 本机可用模型', '', '> ✅ = 多模态（可识图，前端/UI 校验用）｜ 单位 $/百万 token ｜ 思考: effort档位或 on/off ｜ ⚠️套餐 = 套餐计费（标注 $0 但扣套餐额度）', ''];
       for (const [provider, modelList] of Object.entries(models)) {
-        lines.push(`### ${provider}（${modelList.length} 个模型）`);
+        const planTag = isPlanBillingProvider(provider) ? ' ⚠️套餐' : '';
+        lines.push(`### ${provider}（${modelList.length} 个模型）${planTag}`);
         if (!modelList.length) {
           lines.push('（已认证但模型清单不可读）');
           continue;
         }
         for (const m of modelList) {
-          const cost = m.cost ? `$${m.cost.input}/$${m.cost.output}` : '?';
+          const cost = m.plan ? '套餐' : m.cost ? `$${m.cost.input}/$${m.cost.output}` : '?';
           const ctx = m.context ? `${(m.context / 1000).toFixed(0)}K` : '?';
           const vis = m.multimodal ? ' ✅' : '';
           const rc = reasoningConfigFor(m);
@@ -749,7 +762,9 @@ const registerClusterTools = async (tools, skillsDir) => {
       const priceOf = (id) => {
         const [p] = id.split('/');
         const m = models[p] && models[p].find((x) => x.id === id);
-        return m && m.cost && m.cost.input ? `$${m.cost.input}/${m.cost.output || '?'}` : '?';
+        if (!m) return '?';
+        if (m.plan) return '⚠️套餐';
+        return m.cost && m.cost.input ? `$${m.cost.input}/${m.cost.output || '?'}` : '?';
       };
       const reasoningOf = (id) => {
         const [p] = id.split('/');
