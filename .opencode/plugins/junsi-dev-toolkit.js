@@ -479,7 +479,7 @@ const lbScore = (modelId, domain) => {
   return idx === -1 ? 50 : idx + 1;
 };
 
-const pickModel = (models, candidates, { preference = 'balanced', domain, multimodal } = {}) => {
+const pickModel = (models, candidates, { preference = 'balanced', domain, multimodal, usePlan = 'auto' } = {}) => {
   let pool = [];
   for (const provider of Object.keys(models)) {
     for (const m of models[provider]) pool.push(m);
@@ -491,6 +491,25 @@ const pickModel = (models, candidates, { preference = 'balanced', domain, multim
   }
   const inCandidates = pool.filter((m) => candidates.some((c) => c.split('/').pop() === m.id.split('/').pop() || m.id === c));
   if (inCandidates.length) pool = inCandidates;
+  const planModels = pool.filter((m) => m.plan);
+  const onDemand = pool.filter((m) => !m.plan);
+  if (usePlan === 'no') {
+    pool = onDemand;
+  } else if (usePlan === 'yes') {
+    const chosen = planModels.length
+      ? [...planModels, ...onDemand]
+      : onDemand;
+    const costOf = (m) => (m.plan ? 0 : effectiveCost(m));
+    const sortPlan = (arr) => {
+      arr.sort((a, b) => {
+        if (preference === 'performance') return lbScore(a.id, domain) - lbScore(b.id, domain);
+        if (preference === 'cost') return costOf(a) - costOf(b);
+        return lbScore(a.id, domain) + costOf(a) * 10 - (lbScore(b.id, domain) + costOf(b) * 10);
+      });
+    };
+    sortPlan(chosen);
+    return chosen[0].id;
+  }
   pool.sort((a, b) => {
     if (preference === 'performance') {
       const pa = effectiveCost(a) === 9999 ? 1 : 0;
@@ -712,7 +731,7 @@ const registerClusterTools = async (tools, skillsDir) => {
 
   tools['cluster-allocation'] = tool({
     description:
-      'Cluster 模式：根据本机可用模型和用户倾向（性价比/性能/平衡）生成任务块 → 专精模型分配方案，并返回需要用户确认的内容。分配前必须先调用 cluster-scan-models；前端/看图任务自动优先多模态模型；分配前必须用 question 工具问用户偏好并确认。',
+      'Cluster 模式：根据本机可用模型和用户倾向（性价比/性能/平衡 + 是否使用套餐额度）生成任务块 → 专精模型分配方案。分配前必须先调用 cluster-scan-models；前端/看图任务自动优先多模态模型；必须用 question 工具问用户偏好与套餐选择并确认。',
     args: {
       tasks: schema
         .string()
@@ -721,10 +740,15 @@ const registerClusterTools = async (tools, skillsDir) => {
         .enum(['cost', 'performance', 'balanced'])
         .optional()
         .describe('用户倾向：cost=性价比优先(省钱) / performance=性能优先(贵但强) / balanced=平衡（默认）'),
+      usePlan: schema
+        .enum(['auto', 'yes', 'no'])
+        .optional()
+        .describe('是否使用套餐计费模型（如 zhipuai-coding-plan，标注 $0 但扣套餐额度）：auto=需逐项询问用户是否用各套餐（默认）/ yes=用户同意用套餐 / no=用户拒绝，只用按量'),
     },
     async execute(args, _context) {
       const models = scanAvailableModels();
       const preference = args.preference || 'balanced';
+      const usePlan = args.usePlan || 'auto';
       const domainOf = (type) => {
         if (type === 'frontend') return 'webdev';
         if (type === 'qa') return 'coding';
@@ -750,15 +774,22 @@ const registerClusterTools = async (tools, skillsDir) => {
           .map((s) => ({ name: s.trim() }));
       }
       const prefLabel = { cost: '💰 性价比优先', performance: '🚀 性能优先', balanced: '⚖️ 平衡' }[preference];
+      const planProviders = Object.keys(models).filter((p) => isPlanBillingProvider(p) && models[p].length);
+      const planLabel =
+        usePlan === 'yes'
+          ? `✅ 用套餐（${planProviders.join('、')}）`
+          : usePlan === 'no'
+            ? '🚫 不用套餐，只按量计费'
+            : '❓ 待询问用户是否用套餐';
       const lines = [
         '## Cluster 模型分配方案',
         '',
-        `**用户倾向：${prefLabel}**（用户可手动调整）`,
+        `**用户倾向：${prefLabel}**（用户可手动调整）｜ **套餐额度：${planLabel}**`,
         '',
         '| 任务块 | 类型 | 需多模态 | 推荐模型 | 思考强度 | Subagent | 成本(入/出 per M) |',
         '|--------|------|---------|---------|---------|----------|------------------|',
       ];
-      const pickOne = (cands, type, visionNeeded) => pickModel(models, cands, { preference, domain: domainOf(type), multimodal: visionNeeded });
+      const pickOne = (cands, type, visionNeeded) => pickModel(models, cands, { preference, domain: domainOf(type), multimodal: visionNeeded, usePlan });
       const priceOf = (id) => {
         const [p] = id.split('/');
         const m = models[p] && models[p].find((x) => x.id === id);
@@ -781,6 +812,21 @@ const registerClusterTools = async (tools, skillsDir) => {
         const agentName = `cluster-${type}`;
         const modelId = pickOne(preferred[type] || preferred.frontend, type, visionNeeded);
         lines.push(`| ${t.name} | ${type} | ${visionNeeded ? '✅' : '—'} | \`${modelId || '未检测到可用模型'}\` | ${reasoningOf(modelId) || '—'} | \`${agentName}\` | ${priceOf(modelId) || '?'} |`);
+      }
+      if (planProviders.length && usePlan === 'auto') {
+        lines.push(
+          '',
+          '## ⚠️ 检测到套餐计费 provider，必须先询问用户',
+          `本机可用套餐：\`${planProviders.join('、')}\`（标注 $0 但扣套餐额度；套餐开销与按量比例相当，不是免费）`,
+          '用 question 工具逐项询问用户是否使用这些套餐内的模型，例如：',
+          `- "是否使用 \`${planProviders[0]}\` 内的模型？"（✅ 使用 / 🚫 不用，只按量计费）`,
+          ...(planProviders.length > 1
+            ? planProviders.slice(1).map((p) => `- "是否使用 \`${p}\` 内的模型？"（✅ 使用 / 🚫 不用）`)
+            : []),
+          '用户选择后：同意 → 重新调用本工具传 \`usePlan: "yes"\`；全部拒绝 → 传 \`usePlan: "no"\`。',
+          '用户回答前不得派发 Subagent。',
+          ''
+        );
       }
       lines.push('', '**必须用 question 工具向用户确认此分配方案（或让用户手动指定模型）后再派发 Subagent。**');
       lines.push('', '> 推荐依据：https://arena.ai/leaderboard（WebDev/Image-to-WebDev/Vision/Coding 分榜）。多模态任务必须选 ✅ 模型（能识图确认前端效果）。思考强度按模型能力自动设置（effort 档位或 on/off）。');

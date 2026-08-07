@@ -32,10 +32,14 @@ description: Cluster 模式 — Agent 集群。主 Agent 统筹规划、细化�
    - ⚖️ **平衡**（balanced，默认）
    - 用户可自选其他选项或手动指定模型
 2. 调用 `cluster-allocation`（传 `preference`）生成任务块 → 模型映射表
-3. **多模态要求**：前端/看图/UI 校验类任务必须选 ✅ 多模态模型（能看图确认页面效果），如任务含"截图/看图/页面/界面/UI/视觉/样式"关键词
-4. **思考强度（自动设置，可在确认时调整）**：插件按模型能力自动注入 `reasoningEffort`（effort 档位）或 `reasoning: on/off`——`effort` 档位模型（deepseek-v4-pro/flash、glm-5.2 等）给最高档，仅 toggle 模型（glm-4.6v/glm-5v-turbo 等）开启思考。复杂任务（规划/重构/多步骤集成）可手动要求更高档，简单任务可关掉省 token
-5. 模型擅长领域参考 https://arena.ai/leaderboard 的 WebDev / Image-to-WebDev / Vision / Coding 分榜
-6. **必须用 question 工具向用户确认分配**（可沿用或手动调整模型/思考强度）；用户确认前禁止调用任何 Subagent
+3. **套餐额度必须询问**：检测到套餐计费 provider（如 `zhipuai-coding-plan`、`zai-coding-plan`，标注 $0 但扣套餐额度）时，必须用 question 工具**逐项**询问用户是否使用每个套餐内的模型：
+   - "是否使用 `zhipuai-coding-plan` 内的模型？"（✅ 使用 / 🚫 不用）
+   - 用户同意 → 传 `usePlan: "yes"` 重新分配；全部拒绝 → 传 `usePlan: "no"` 只按量
+   - 套餐开销与按量比例相当，不是免费；用户回答前不得派发
+4. **多模态要求**：前端/看图/UI 校验类任务必须选 ✅ 多模态模型（能看图确认页面效果），如任务含"截图/看图/页面/界面/UI/视觉/样式"关键词
+5. **思考强度（自动设置，可在确认时调整）**：插件按模型能力自动注入 `reasoningEffort`（effort 档位）或 `reasoning: on/off`——`effort` 档位模型（deepseek-v4-flash、glm-5.2 等）给最高档，仅 toggle 模型（glm-4.6v/glm-5v-turbo 等）开启思考。复杂任务（规划/重构/多步骤集成）可手动要求更高档，简单任务可关掉省 token
+6. 模型擅长领域参考 https://arena.ai/leaderboard 的 WebDev / Image-to-WebDev / Vision / Coding 分榜
+7. **必须用 question 工具向用户确认分配**（可沿用或手动调整模型/思考强度）；用户确认前禁止调用任何 Subagent
 
 ### 步骤 4：派发 Subagent（必须走 cluster-task-prompt）
 
@@ -56,6 +60,7 @@ description: Cluster 模式 — Agent 集群。主 Agent 统筹规划、细化�
 - [ ] 已输出 `📌 路由宣告: cluster`
 - [ ] 已调用 `cluster-scan-models` 检测可用模型
 - [ ] 已用 `question` 工具问用户倾向（性价比/性能/平衡，或手动指定）
+- [ ] 检测到套餐 provider 时已用 `question` 询问是否用套餐额度（yes/no）
 - [ ] 前端/看图任务已确认使用多模态（✅）模型
 - [ ] 已用 `question` 工具确认模型分配
 - [ ] 每个任务块已用 `cluster-task-prompt` 生成派发 prompt
