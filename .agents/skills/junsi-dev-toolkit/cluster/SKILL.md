@@ -87,10 +87,10 @@ description: Cluster 模式 — Agent 集群。主 Agent 统筹规划、细化�
 
 | Subagent | 职责 | 默认模型（插件按可用性注入） |
 |----------|------|------------------------------|
-| `cluster-planner` | 需求细化、任务拆分、技术方案 | DeepSeek V4 Pro |
+| `cluster-planner` | 需求细化、任务拆分、技术方案 | DeepSeek V4 Flash（0731，超 v4-pro preview 且更便宜） |
 | `cluster-frontend` | 前端实现（TS/React/Vue 等） | Kimi K3 |
 | `cluster-backend` | 后端实现（API/数据库/服务） | DeepSeek V4 Flash |
 | `cluster-qa` | 测试用例、构建验证、回归 | GLM-5.2 |
 | `cluster-docs` | 文档、ADR、README | GLM-5.2 |
 
-模型不可用时插件自动回退到可用模型（启动时检测并注入）。
+> 模型优先级：DeepSeek V4 Flash（2026-07-31 公测版）> V4 Pro（preview 未 GA，等 GA 后再启用）。模型不可用时插件自动回退到可用模型（启动时检测并注入）。

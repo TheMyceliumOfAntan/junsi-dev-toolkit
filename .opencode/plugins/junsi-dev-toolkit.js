@@ -456,8 +456,8 @@ const LEADERBOARD = {
   webdev: ['kimi-k3-max', 'qwen3.8-max', 'glm-5.2-max', 'deepseek-v4-flash-high', 'claude-opus-4-7'],
   vision: ['qwen3.8-max', 'gemini-3.6-flash', 'claude-fable-5', 'claude-opus-4-7'],
   image2web: ['kimi-k3-max', 'qwen3.8-max', 'glm-5.2-max'],
-  coding: ['kimi-k3-max', 'qwen3.8-max', 'deepseek-v4-pro', 'glm-5.2-max', 'deepseek-v4-flash'],
-  text: ['qwen3.8-max', 'glm-5.2-max', 'deepseek-v4-pro', 'deepseek-v4-flash'],
+  coding: ['kimi-k3-max', 'qwen3.8-max', 'deepseek-v4-flash', 'glm-5.2-max', 'deepseek-v4-pro'],
+  text: ['qwen3.8-max', 'glm-5.2-max', 'deepseek-v4-flash', 'deepseek-v4-pro'],
 };
 
 const lbScore = (modelId, domain) => {
@@ -560,7 +560,7 @@ const buildClusterAgents = (models, skillsDir) => {
     type: 'feature',
     description: 'Cluster 模式主控：总体规划、细化需求、任务分块，派发给专精模型 Subagent 并行执行',
     mode: 'primary',
-    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2']) || anyModel(),
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2']) || anyModel(),
     temperature: 0.2,
     permission: {
       edit: 'allow',
@@ -573,7 +573,7 @@ const buildClusterAgents = (models, skillsDir) => {
     type: 'feature',
     description: 'Cluster 规划 Subagent：需求细化、任务拆分、技术方案设计（规划专精模型）',
     mode: 'subagent',
-    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash']) || anyModel(),
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2']) || anyModel(),
     temperature: 0.1,
     permission: { edit: 'deny', bash: 'deny' },
   });
@@ -719,7 +719,7 @@ const registerClusterTools = async (tools, skillsDir) => {
         return 'coding';
       };
       const preferred = {
-        planner: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        planner: ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
         frontend: ['moonshotai/kimi-k3', 'zhipuai/glm-4.6v', 'zhipuai/glm-5v-turbo', 'deepseek/deepseek-v4-flash'],
         backend: ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
         qa: ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
