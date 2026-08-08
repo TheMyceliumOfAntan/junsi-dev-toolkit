@@ -55,6 +55,21 @@
 
 MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 
+## 验证安装 / 升级
+
+```powershell
+# 快速检验：自动定位安装副本，检查文件完整性/语法/版本标记/10 工具注册
+pwsh scripts/verify-install.ps1
+
+# 与源码仓库对比（hash 一致性，确认已升级到最新）
+pwsh scripts/verify-install.ps1 -RepoPath <仓库路径>
+
+# 深度模式：真实加载插件验证工具注册 + memory-doctor 冒烟（需联网装依赖，一次性）
+pwsh scripts/verify-install.ps1 -Full
+```
+
+任一项 FAIL 即未安装成功或未升级到位；全部 PASS 表示新会话即可使用。旧版安装副本会如实报 FAIL（如缺 `list-decisions`、hash 不一致），提示重新安装。
+
 ## 架构
 
 ```
