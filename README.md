@@ -2,15 +2,16 @@
 
 > 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群。
 
-## v2.2 核心能力
+## v3.0 核心能力
 
 - **Cluster 模式（Agent 集群）**：主 Agent（`cluster`，Tab 切换）总体规划 → **动态检测本机可用模型**（`cluster-scan-models`，读 auth.json + 环境变量）→ 生成任务块→专精模型分配方案（`cluster-allocation`）→ **question 工具问用户确认** → 派发给 5 个专精 Subagent 并行执行 → 汇总验证。Subagent 模型按本机可用性自动降级。
 - **代码级路由 + 子技能全文注入**：插件用关键词正则匹配用户消息（含"优化/重构/改进/集群"等），命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告（`📌 路由宣告: {id}`）+ 强制完成清单；纯问答零注入，省 token。
-- **Memory 工具**：`store-decision` / `save-progress` / `prepare-handoff` / `restore-handoff` 注册为真实工具，自动维护 `.memory/`、`INDEX.md`、`.gitignore`。
+- **Memory v3（7 个真实工具）**：`store-decision`（支持 `scope=global` 全局决策）/ `save-progress`（进度历史版本化，不覆盖）/ `prepare-handoff` / `restore-handoff`（`complete` 归档）/ `list-decisions`（分词模糊检索，合并项目+全局）/ `memory-doctor`（健康审计）/ `save-preference`（全局偏好）。自动维护 `.memory/`、`INDEX.md`（≤200 行硬上限）、`.gitignore`。
 - **强制记忆与文档**：子技能完成清单强制调用 `store-decision`/`save-progress`，涉及 API/架构/UI 变更强制走 project-docs 的 `update_doc`/`create_adr`，禁止乱写文档。
-- **HANDOFF 自动恢复**：新会话检测 `.memory/HANDOFF.md` 自动注入恢复指令。
-- **压缩上下文保护**：会话压缩时自动注入 `.memory` 摘要，跨压缩保留任务状态。
-- **idle 自动痕迹**：会话空闲时自动初始化 `.memory/` 骨架并记录会话痕迹。
+- **HANDOFF 自动恢复**：新会话检测 `.memory/HANDOFF.md` 自动注入恢复指令；完成后 `complete: true` 归档到 `sessions/` 并移除，防过期残留。
+- **全局记忆层**：`~/.config/opencode/.memory/` 存跨项目偏好与全局决策，新会话启动注入偏好，压缩时注入全局决策画像。
+- **压缩上下文保护**：会话压缩时按预算装配注入（全局偏好 → 任务索引 → 项目/全局决策画像 → HANDOFF 摘要），跨压缩保留任务状态。
+- **idle 自动痕迹**：会话空闲时写入真实会话摘要（进度 + 决策），形成任务时间线。
 
 ## 工具
 
@@ -21,7 +22,7 @@
 | **diagnose-before-fix** | Bug 修复（8步流程 + 原始复测） | 报错、不工作、崩溃、白屏 |
 | **requirements-driven-dev** | 新功能开发（澄清 -> 实现 -> 验证） | 添加、新增、实现 |
 | **project-docs** | 项目知识中枢（15个MCP代码感知工具） | 文档、规范、ADR、API、路由 |
-| **memory-skill** | 决策记忆、进度保存、跨会话恢复 | 记住、保存进度、换会话 |
+| **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
 
 ## Cluster 模式
 
@@ -64,7 +65,7 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 - **插件路由**：`junsi-dev-toolkit.js` 正则匹配开发意图关键词，命中才注入精简指令；HANDOFF 检测与 memory 工具由插件承载。
 - **MCP 定范围**：路由前直接调 MCP 工具定位目录/端点/组件/文件，子技能只在范围内精细解析。
 - **MCP 工具**：`project_tree`、`api_endpoints`、`frontend_routes`、`component_inventory`、`project_config`、`tauri_commands`、`tauri_capabilities`、`api_client`、`stores`、`hooks`、`code_context`、`query_docs`、`create_adr`、`update_doc`、`generate_docs`。
-- **Memory 工具**：插件注册 4 个真实工具，`.memory/` 目录持久化进度和决策，HANDOFF 支持跨会话恢复。
+- **Memory 工具**：插件注册 7 个真实工具，`.memory/` 目录持久化进度（含历史版本）和决策，HANDOFF 支持跨会话恢复；`~/.config/opencode/.memory/` 承载跨项目全局偏好与决策。
 
 ## 快速使用
 
@@ -75,6 +76,8 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 | 添加功能 | "加一个导出 CSV 功能" |
 | 查询文档 | "API 响应格式是什么规范？" |
 | 保存进度 | "记一下做到哪了" |
+| 回顾决策 | "有哪些决策" / "回顾决策" |
+| 记忆体检 | "健康审计" / "记忆体检" |
 
 ## 许可
 
