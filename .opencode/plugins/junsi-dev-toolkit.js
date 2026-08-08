@@ -4,7 +4,7 @@
  * - 代码级意图路由：关键词正则匹配用户消息，命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告
  * - 未匹配到开发意图（纯问答）→ 零注入（省 token）
  * - 新会话检测 .memory/HANDOFF.md → 注入恢复指令
- * - memory 自定义工具：store-decision / save-progress / prepare-handoff / restore-handoff
+ * - memory 自定义工具：store-decision / save-progress / prepare-handoff / restore-handoff / list-decisions / memory-doctor / save-preference
  * - Cluster 模式：config hook 注入 cluster 主 agent + 5 个专精 subagent（模型按本机可用性动态降级）
  *   + cluster-scan-models / cluster-allocation 工具（动态检测 + 分配方案，需用户确认）
  * - 会话压缩钩子：自动注入 .memory 索引与 HANDOFF 摘要
@@ -47,7 +47,7 @@ const ROUTES = [
     priority: 3,
     skillPath: '.agents/skills/junsi-dev-toolkit/memory-skill/SKILL.md',
     summary: '决策记忆 / 进度保存 / HANDOFF 跨会话恢复（.memory/ 目录）',
-    keywords: ['记住', '记录', '记一下', '决策', '保存进度', '换会话', '降智', '上下文不够', '恢复进度'],
+    keywords: ['记住', '记录', '记一下', '决策', '保存进度', '换会话', '降智', '上下文不够', '恢复进度', '有哪些决策', '决策历史', '回顾决策', '健康审计', '记忆体检'],
   },
   {
     id: 'project-docs',
@@ -167,7 +167,20 @@ const hasInjection = (parts) => {
   return Array.isArray(parts) && parts.some((p) => p && p.type === 'text' && p.text.includes(INJECT_MARK));
 };
 
+const MEMORY_LIMITS = {
+  indexLines: 200,
+  indexBytes: 25 * 1024,
+  handoffBytes: 12 * 1024,
+  historyMax: 20,
+  compactDecision: 3,
+  compactHandoff: 800,
+  compactPreference: 800,
+  compactIndex: 20 * 1024,
+  doctorHandoffStaleDays: 7,
+};
+
 const memoryDir = (projectDir) => path.join(projectDir, '.memory');
+const userMemoryDir = () => path.join(os.homedir(), '.config', 'opencode', '.memory');
 const readOrEmpty = (p) => {
   try {
     return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
@@ -180,8 +193,15 @@ const ensureMemoryDir = (dir) => {
   const mem = memoryDir(dir);
   fs.mkdirSync(path.join(mem, 'decisions'), { recursive: true });
   fs.mkdirSync(path.join(mem, 'progress'), { recursive: true });
+  fs.mkdirSync(path.join(mem, 'progress', 'history'), { recursive: true });
   fs.mkdirSync(path.join(mem, 'sessions'), { recursive: true });
   return mem;
+};
+
+const ensureUserMemoryDir = () => {
+  const dir = userMemoryDir();
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 };
 
 const ensureGitignore = (dir) => {
@@ -205,24 +225,112 @@ const slugify = (title = '') =>
     .replace(/^-+|-+$/g, '')
     .slice(0, 40) || 'untitled';
 
-const writeIndex = (mem, summaryLines) => {
+const decisionFiles = (mem) => {
+  const d = path.join(mem, 'decisions');
+  if (!fs.existsSync(d)) return [];
+  return fs.readdirSync(d).filter((f) => f.endsWith('.md')).sort();
+};
+
+const listRecentDecisions = (mem, n = 3) => decisionFiles(mem).reverse().slice(0, n);
+
+const readDecisionTitle = (content, fallback) => {
+  const m = content.match(/^## 决策记录：(.+)$/m) || content.match(/^# 决策：(.+)$/m);
+  return m ? m[1] : fallback;
+};
+
+const measureText = (text) => {
+  const lines = text.split('\n').length;
+  const bytes = Buffer.byteLength(text, 'utf8');
+  return { lines, bytes };
+};
+
+const writeIndex = (mem, { task, stage } = {}) => {
+  const progress = readOrEmpty(path.join(mem, 'progress', 'current.md'));
+  const progressHead = progress.split('\n').slice(0, 6).join('\n').trim();
+  const progressTitle = progress.match(/^## 进度：(.+)$/m) || progress.match(/^# 进度：(.+)$/m);
+  const recent = listRecentDecisions(mem, 3).map((f) => {
+    const c = readOrEmpty(path.join(mem, 'decisions', f));
+    return `- ${readDecisionTitle(c, f.slice(0, 40))}（${f.slice(0, 10)}）`;
+  });
+  const handoffPath = path.join(mem, 'HANDOFF.md');
+  const handoff = fs.existsSync(handoffPath);
+  const historyCount = fs.existsSync(path.join(mem, 'progress', 'history'))
+    ? fs.readdirSync(path.join(mem, 'progress', 'history')).filter((f) => f.endsWith('.md')).length
+    : 0;
+  const taskLine = (task || (progressTitle ? progressTitle[1] : '（未命名任务）')).slice(0, 120);
+  const stageLine = stage || (progress.match(/^- 阶段：(.+)$/m) ? progress.match(/^- 阶段：(.+)$/m)[1] : '未记录');
   const lines = [
     '# 任务索引',
     '',
-    `> 自动维护：${new Date().toISOString().slice(0, 10)}`,
+    `> 自动维护：${new Date().toISOString().slice(0, 10)} ｜ 超 ${MEMORY_LIMITS.indexLines} 行会被拒绝，请精简`,
     '',
-    ...summaryLines,
-  ];
-  fs.writeFileSync(path.join(mem, 'INDEX.md'), lines.join('\n'), 'utf8');
+    '## 当前任务',
+    `- 标题：${taskLine}`,
+    `- 阶段：${stageLine}`,
+    `- 最后更新：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+    '',
+    '## 进度摘要',
+    progressHead || '（无）',
+    '',
+    '## 最近决策',
+    recent.length ? recent.join('\n') : '（无）',
+    '',
+    '## 状态',
+    `- HANDOFF：${handoff ? `就绪（${new Date(fs.statSync(handoffPath).mtime).toLocaleString()}）` : '无'}`,
+    `- 进度历史快照：${historyCount} 条（上限 ${MEMORY_LIMITS.historyMax}）`,
+    `- 决策总数：${decisionFiles(mem).length}`,
+    '',
+    '## 快速链接',
+    '- 决策：`.memory/decisions/`',
+    '- 进度：`.memory/progress/current.md`',
+    '- 历史：`.memory/progress/history/`',
+    '- 会话：`.memory/sessions/`',
+    '',
+  ].join('\n');
+  const { lines: nLines, bytes } = measureText(lines);
+  if (nLines > MEMORY_LIMITS.indexLines || bytes > MEMORY_LIMITS.indexBytes) {
+    return { ok: false, message: `INDEX.md 超限（${nLines} 行 / ${(bytes / 1024).toFixed(1)}KB > ${MEMORY_LIMITS.indexLines} 行 / ${(MEMORY_LIMITS.indexBytes / 1024).toFixed(0)}KB）：已拒绝写入，请精简进度摘要与决策标题后再保存` };
+  }
+  fs.writeFileSync(path.join(mem, 'INDEX.md'), lines, 'utf8');
+  return { ok: true, message: `INDEX.md 已更新（${nLines} 行 / ${(bytes / 1024).toFixed(1)}KB）` };
 };
 
-const loadIndexSummary = (mem) => {
-  const progress = readOrEmpty(path.join(mem, 'progress', 'current.md'));
-  const decisionCount = fs.existsSync(path.join(mem, 'decisions'))
-    ? fs.readdirSync(path.join(mem, 'decisions')).filter((f) => f.endsWith('.md')).length
-    : 0;
-  const first = progress.split('\n').slice(0, 8).join('\n');
-  return `## 当前进度\n${first || '（无）'}\n\n## 决策记录\n${decisionCount} 条`;
+const archiveProgress = (mem) => {
+  const current = path.join(mem, 'progress', 'current.md');
+  if (!fs.existsSync(current)) return;
+  const hist = path.join(mem, 'progress', 'history');
+  fs.mkdirSync(hist, { recursive: true });
+  const content = readOrEmpty(current);
+  const title = (content.match(/^## 进度：(.+)$/m) || content.match(/^# 进度：(.+)$/m) || [])[1] || 'progress';
+  fs.writeFileSync(path.join(hist, `${timestamp()}-${slugify(title)}.md`), content, 'utf8');
+  const files = fs.readdirSync(hist).filter((f) => f.endsWith('.md')).sort();
+  while (files.length > MEMORY_LIMITS.historyMax) {
+    fs.unlinkSync(path.join(hist, files.shift()));
+  }
+};
+
+const appendSessionTrace = (mem, { task, stage, source }) => {
+  const dir = path.join(mem, 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${timestamp()}.md`);
+  const line = `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')}｜${task}（${stage}）｜${source || 'save-progress'}`;
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, ['# 会话痕迹', line, ''].join('\n'), 'utf8');
+  } else {
+    fs.appendFileSync(file, `${line}\n`, 'utf8');
+  }
+};
+
+const archiveHandoff = (mem, prefix = 'handoff-done') => {
+  const f = path.join(mem, 'HANDOFF.md');
+  if (!fs.existsSync(f)) return false;
+  const dir = path.join(mem, 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const content = readOrEmpty(f);
+  const title = (content.match(/^## 任务\s*\n(.+)$/m) || [])[1] || 'handoff';
+  fs.writeFileSync(path.join(dir, `${prefix}-${timestamp()}-${slugify(title)}.md`), content, 'utf8');
+  fs.unlinkSync(f);
+  return true;
 };
 
 const registerMemoryTools = async (tools) => {
@@ -236,27 +344,32 @@ const registerMemoryTools = async (tools) => {
 
   tools['store-decision'] = tool({
     description:
-      '记录一条关键决策到项目 .memory/decisions/。当用户说"记住/记录/记一下/方案确认/决策"时调用，或子技能在阶段确认后自动调用。',
+      '记录一条关键决策。默认写入项目 .memory/decisions/；scope=global 时写入用户级 ~/.config/opencode/.memory/decisions/（跨项目生效，适合通用经验/偏好型决策）。当用户说"记住/记录/记一下/方案确认/决策"时调用，或子技能在阶段确认后自动调用。',
     args: {
       title: schema.string().describe('决策标题'),
       scenario: schema.string().describe('场景/上下文'),
       decision: schema.string().describe('选了什么方案，为什么不选其他'),
       impact: schema.string().optional().describe('影响范围（文件/模块）'),
+      scope: schema.enum(['project', 'global']).optional().describe('project=写入项目 .memory/decisions/（默认）；global=写入用户级全局记忆，跨项目生效'),
     },
     async execute(args, context) {
       const mem = ensureMemoryDir(context.directory);
       ensureGitignore(context.directory);
-      const file = path.join(mem, 'decisions', `${timestamp()}-${slugify(args.title)}.md`);
+      const isGlobal = args.scope === 'global';
+      const targetDir = isGlobal ? path.join(ensureUserMemoryDir(), 'decisions') : path.join(mem, 'decisions');
+      fs.mkdirSync(targetDir, { recursive: true });
+      const file = path.join(targetDir, `${timestamp()}-${slugify(args.title)}.md`);
       const content = [
         '## 决策记录：' + args.title,
         '- 日期：' + new Date().toISOString().slice(0, 10),
         '- 场景：' + args.scenario,
         '- 方案：' + args.decision,
         ...(args.impact ? ['- 影响范围：' + args.impact] : []),
+        ...(isGlobal ? ['- 作用域：global（跨项目生效）'] : []),
         '',
       ].join('\n');
       fs.writeFileSync(file, content, 'utf8');
-      return `已记录决策: ${file}`;
+      return `已记录决策: ${file}${isGlobal ? '（全局作用域，跨项目生效）' : ''}`;
     },
   });
 
@@ -273,6 +386,8 @@ const registerMemoryTools = async (tools) => {
     },
     async execute(args, context) {
       const mem = ensureMemoryDir(context.directory);
+      ensureGitignore(context.directory);
+      archiveProgress(mem);
       const file = path.join(mem, 'progress', 'current.md');
       const content = [
         '## 进度：' + args.task,
@@ -285,8 +400,9 @@ const registerMemoryTools = async (tools) => {
         '',
       ].join('\n');
       fs.writeFileSync(file, content, 'utf8');
-      writeIndex(mem, [`- **当前任务**：${args.task}（${args.stage}）`, `- 进度文件：\`progress/current.md\``]);
-      return `进度已保存: ${file}`;
+      const idx = writeIndex(mem, { task: args.task, stage: args.stage });
+      appendSessionTrace(mem, { task: args.task, stage: args.stage, source: 'save-progress' });
+      return `进度已保存: ${file}\n${idx.message}`;
     },
   });
 
@@ -305,6 +421,7 @@ const registerMemoryTools = async (tools) => {
     async execute(args, context) {
       const mem = ensureMemoryDir(context.directory);
       const file = path.join(mem, 'HANDOFF.md');
+      archiveHandoff(mem, 'handoff-previous');
       const content = [
         '# HANDOFF',
         '',
@@ -325,23 +442,179 @@ const registerMemoryTools = async (tools) => {
         '',
         ...(args.decisions ? ['## 关键决策', args.decisions, ''] : []),
         ...(args.next ? ['## 下一步', args.next, ''] : []),
-        '> 新会话自动检测本文件并注入恢复指令。完成后更新或删除。',
+        '> 新会话自动检测本文件并注入恢复指令。恢复完成后调用 `restore-handoff`（complete: true）归档并移除本文件。',
         '',
       ].join('\n');
+      const { lines, bytes } = measureText(content);
+      if (bytes > MEMORY_LIMITS.handoffBytes) {
+        return `HANDOFF 超限（${(bytes / 1024).toFixed(1)}KB > ${(MEMORY_LIMITS.handoffBytes / 1024).toFixed(0)}KB）：已拒绝写入，请压缩状态/待办/决策摘要后再试`;
+      }
       fs.writeFileSync(file, content, 'utf8');
-      writeIndex(mem, [`- **HANDOFF 就绪**：${args.task}`]);
-      return `HANDOFF 已生成: ${file}`;
+      const idx = writeIndex(mem, { task: args.task, stage: '准备换会话' });
+      appendSessionTrace(mem, { task: args.task, stage: 'HANDOFF', source: 'prepare-handoff' });
+      return `HANDOFF 已生成: ${file}（${lines} 行 / ${(bytes / 1024).toFixed(1)}KB）\n${idx.message}`;
     },
   });
 
   tools['restore-handoff'] = tool({
     description:
-      '读取 .memory/HANDOFF.md 恢复跨会话状态。新会话检测到 HANDOFF 时由路由层自动调用；用户说"恢复进度/接着上次做"时也可调用。',
+      '读取 .memory/HANDOFF.md 恢复跨会话状态。新会话检测到 HANDOFF 时由路由层自动调用；用户说"恢复进度/接着上次做"时也可调用。complete=true 表示任务确认完成，读后归档 HANDOFF 到 sessions/ 并移除活动文件。',
+    args: {
+      complete: schema.boolean().optional().describe('任务是否已完成：true=读后归档并移除 HANDOFF（防止过期恢复包误导新会话）；默认 false=仅读取'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const content = readOrEmpty(path.join(mem, 'HANDOFF.md'));
+      if (!content) return '未找到 .memory/HANDOFF.md，无待恢复任务。';
+      const result = `HANDOFF.md 内容如下，直接恢复工作状态（无需重新读代码/查结构）：\n\n${content}`;
+      if (args.complete) {
+        const archived = archiveHandoff(mem, 'handoff-done');
+        writeIndex(mem);
+        return archived ? `${result}\n\n（任务已确认完成：HANDOFF 已归档到 sessions/ 并移除，新会话不再注入）` : result;
+      }
+      return result;
+    },
+  });
+
+  tools['list-decisions'] = tool({
+    description:
+      '列出决策历史（标题+日期+摘要），按时间倒序，支持分词模糊匹配（空格分词，AND 全命中优先、OR 兜底）。scope=all 时合并项目 + 全局决策（全局标注 🌐）。用户说"有哪些决策/决策历史/回顾决策"时调用。',
+    args: {
+      keyword: schema.string().optional().describe('关键词过滤（标题或内容包含，留空列出全部）'),
+      limit: schema.number().optional().describe('最多返回条数，默认 20，最大 50'),
+      scope: schema.enum(['all', 'project', 'global']).optional().describe('all=合并项目+全局决策（默认）；project=仅项目；global=仅全局'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const scope = args.scope || 'all';
+      const globalDecDir = path.join(ensureUserMemoryDir(), 'decisions');
+      const sources = [];
+      if (scope !== 'global') sources.push({ dir: path.join(mem, 'decisions'), tag: '' });
+      if (scope !== 'project') sources.push({ dir: globalDecDir, tag: '🌐 ' });
+      const files = [];
+      for (const s of sources) {
+        if (!fs.existsSync(s.dir)) continue;
+        for (const f of fs.readdirSync(s.dir).filter((x) => x.endsWith('.md')).sort().reverse()) {
+          files.push({ f, tag: s.tag, dir: s.dir });
+        }
+      }
+      files.sort((a, b) => (a.f < b.f ? 1 : -1));
+      if (!files.length) return '尚无决策记录。';
+      const limit = Math.min(Math.max(args.limit || 20, 1), 50);
+      const tokens = (args.keyword || '').trim().toLowerCase().split(/[\s,，、;；]+/).filter(Boolean);
+      const contentOf = (src) => {
+        const c = readOrEmpty(path.join(src.dir, src.f));
+        return { c, title: readDecisionTitle(c, src.f) };
+      };
+      const matches = (hay, toks, mode) => (mode === 'or' ? toks.some((t) => hay.includes(t)) : toks.every((t) => hay.includes(t)));
+      let matched = [];
+      let mode = 'all';
+      if (tokens.length) {
+        const andHit = files.filter((src) => {
+          const { c, title } = contentOf(src);
+          return matches(`${title}\n${c}`.toLowerCase(), tokens, 'and');
+        });
+        if (andHit.length || tokens.length === 1) {
+          matched = andHit;
+          mode = tokens.length === 1 ? 'single' : 'and';
+        } else {
+          matched = files.filter((src) => {
+            const { c, title } = contentOf(src);
+            return matches(`${title}\n${c}`.toLowerCase(), tokens, 'or');
+          });
+          mode = 'or';
+        }
+      } else {
+        matched = files;
+      }
+      const out = matched.slice(0, limit).map((src) => {
+        const { c, title } = contentOf(src);
+        const head = c.split('\n').filter((l) => l.trim()).slice(0, 4).join('\n  ');
+        return `- ${src.tag}**${title}**（${src.f.slice(0, 10)}）\n  ${head}`;
+      });
+      const modeLabel = { all: '全部', single: `单词过滤（词：${tokens[0]}）`, and: `AND 全词匹配（词：${tokens.join(' / ')}）`, or: `OR 任意词匹配（AND 无结果，兜底：${tokens.join(' / ')}）` }[mode];
+      const nProject = fs.existsSync(sources[0] ? sources[0].dir : '') ? fs.readdirSync(sources[0].dir).filter((x) => x.endsWith('.md')).length : 0;
+      const nGlobal = fs.existsSync(sources[1] ? sources[1].dir : '') ? fs.readdirSync(sources[1].dir).filter((x) => x.endsWith('.md')).length : 0;
+      return out.length
+        ? `## 决策历史（显示 ${out.length} / 共 ${files.length} 条${args.keyword ? `，${modeLabel}` : ''}${scope === 'all' ? `｜项目 ${nProject} + 全局 🌐 ${nGlobal}` : ''}）\n\n${out.join('\n\n')}\n\n> 想回溯某条全文：读取对应 decisions/ 目录下的文件`
+        : `无匹配决策（关键词：${args.keyword || '空'}）。`;
+    },
+  });
+
+  tools['memory-doctor'] = tool({
+    description:
+      'memory 健康审计：检查 INDEX 大小/结构、进度文件、HANDOFF 是否过期残留、决策与会话数量、全局记忆层。用户说"健康审计/记忆体检"时调用。',
     args: {},
     async execute(_args, context) {
-      const content = readOrEmpty(path.join(memoryDir(context.directory), 'HANDOFF.md'));
-      if (!content) return '未找到 .memory/HANDOFF.md，无待恢复任务。';
-      return `HANDOFF.md 内容如下，直接恢复工作状态（无需重新读代码/查结构）：\n\n${content}`;
+      const mem = ensureMemoryDir(context.directory);
+      const issues = [];
+      const notes = [];
+      const check = (ok, msg) => (ok ? notes.push(`✅ ${msg}`) : issues.push(`⚠️ ${msg}`));
+
+      const idx = readOrEmpty(path.join(mem, 'INDEX.md'));
+      if (!idx) {
+        issues.push('INDEX.md 缺失（运行 save-progress 或 prepare-handoff 生成）');
+      } else {
+        const { lines, bytes } = measureText(idx);
+        check(lines <= MEMORY_LIMITS.indexLines && bytes <= MEMORY_LIMITS.indexBytes, `INDEX.md ${lines} 行 / ${(bytes / 1024).toFixed(1)}KB（上限 ${MEMORY_LIMITS.indexLines} 行 / ${(MEMORY_LIMITS.indexBytes / 1024).toFixed(0)}KB）`);
+        const hasTask = /^## 当前任务/m.test(idx) && /^- 标题：/m.test(idx);
+        check(hasTask, 'INDEX.md 结构完整（含"当前任务"）');
+        check(/^## 最近决策/m.test(idx), 'INDEX.md 含"最近决策"区块');
+      }
+
+      const progress = path.join(mem, 'progress', 'current.md');
+      check(fs.existsSync(progress), `进度文件存在（${fs.existsSync(progress) ? (measureText(readOrEmpty(progress)).bytes / 1024).toFixed(1) + 'KB' : '缺失'}）`);
+
+      const handoff = path.join(mem, 'HANDOFF.md');
+      if (fs.existsSync(handoff)) {
+        const ageDays = (Date.now() - fs.statSync(handoff).mtimeMs) / 86400000;
+        if (ageDays > MEMORY_LIMITS.doctorHandoffStaleDays) {
+          issues.push(`HANDOFF.md 已存在 ${ageDays.toFixed(1)} 天，疑似过期残留（>${MEMORY_LIMITS.doctorHandoffStaleDays} 天）：若任务已完成请调用 restore-handoff（complete: true）归档移除`);
+        } else {
+          notes.push(`HANDOFF.md 存在（${ageDays.toFixed(1)} 天前更新）`);
+        }
+      } else {
+        notes.push('无活动 HANDOFF');
+      }
+
+      const nDec = decisionFiles(mem).length;
+      notes.push(`决策 ${nDec} 条`);
+      const sDir = path.join(mem, 'sessions');
+      const nSess = fs.existsSync(sDir) ? fs.readdirSync(sDir).filter((f) => f.endsWith('.md')).length : 0;
+      notes.push(`会话记录 ${nSess} 条`);
+      const hDir = path.join(mem, 'progress', 'history');
+      const nHist = fs.existsSync(hDir) ? fs.readdirSync(hDir).filter((f) => f.endsWith('.md')).length : 0;
+      check(nHist <= MEMORY_LIMITS.historyMax, `进度历史 ${nHist} 条（上限 ${MEMORY_LIMITS.historyMax}，超出自动裁剪）`);
+
+      const up = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+      check(Boolean(up.trim()), `全局用户偏好 ${up.trim() ? '已初始化' : '未初始化（用 save-preference 写入全局偏好）'}（~/.config/opencode/.memory/）`);
+      const gDecDir = path.join(userMemoryDir(), 'decisions');
+      const nGDec = fs.existsSync(gDecDir) ? fs.readdirSync(gDecDir).filter((f) => f.endsWith('.md')).length : 0;
+      notes.push(`全局决策 ${nGDec} 条（scope=global 的 store-decision 写入）`);
+
+      const head = ['# memory 健康审计', '', `- 时间：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, `- 项目：.memory/`, '- 状态：' + (issues.length ? `${issues.length} 个问题` : '全部健康'), ''];
+      return head.concat(notes.map((n) => n + '\n'), issues.map((i) => i + '\n'), issues.length ? ['', '> 修复建议见各问题说明。'] : []).join('\n');
+    },
+  });
+
+  tools['save-preference'] = tool({
+    description:
+      '保存跨项目全局偏好到 ~/.config/opencode/.memory/preferences.md（用户级记忆，所有项目生效）。用户说"记住我的偏好/以后都用XX/默认XX"时调用。',
+    args: {
+      preference: schema.string().describe('偏好内容（一句话，可验证，如"前端项目一律用 pnpm，不用 npm"）'),
+    },
+    async execute(args, _context) {
+      const dir = ensureUserMemoryDir();
+      const file = path.join(dir, 'preferences.md');
+      const existing = readOrEmpty(file);
+      const line = `- ${new Date().toISOString().slice(0, 10)}：${args.preference.trim()}`;
+      const content = existing.trim() ? `${existing.trimEnd()}\n${line}\n` : `# 全局用户偏好\n\n> 跨项目生效，会话压缩时自动注入。避免重复条目，语义相同请合并。\n\n${line}\n`;
+      const { bytes } = measureText(content);
+      if (bytes > MEMORY_LIMITS.compactPreference * 3) {
+        return `preferences.md 已偏大（${(bytes / 1024).toFixed(1)}KB）：请合并重复条目后再追加`;
+      }
+      fs.writeFileSync(file, content, 'utf8');
+      return `已保存全局偏好: ${file}`;
     },
   });
 
@@ -885,14 +1158,26 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
         injections.push(buildRouteInjection(route, skillsDir));
       }
 
-      if (isFirstUserMessage && fs.existsSync(path.join(memoryDir(directory), 'HANDOFF.md'))) {
-        injections.push([
-          '# junsi-dev-toolkit：检测到 HANDOFF',
-          `存在 \`.memory/HANDOFF.md\`（${new Date(fs.statSync(path.join(memoryDir(directory), 'HANDOFF.md')).mtime).toLocaleString()}）`,
-          '1. 调用 `restore-handoff` 工具读取完整恢复包',
-          '2. 按恢复包继续任务，不要重新扫描项目',
-          INJECT_MARK,
-        ].join('\n'));
+      if (isFirstUserMessage) {
+        const upref = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+        if (upref.trim()) {
+          injections.push([
+            '# junsi-dev-toolkit：全局用户记忆',
+            '以下为跨项目全局偏好（~/.config/opencode/.memory/preferences.md），开工前必须遵守：',
+            '',
+            upref.slice(0, MEMORY_LIMITS.compactPreference),
+            INJECT_MARK,
+          ].join('\n'));
+        }
+        if (fs.existsSync(path.join(memoryDir(directory), 'HANDOFF.md'))) {
+          injections.push([
+            '# junsi-dev-toolkit：检测到 HANDOFF',
+            `存在 \`.memory/HANDOFF.md\`（${new Date(fs.statSync(path.join(memoryDir(directory), 'HANDOFF.md')).mtime).toLocaleString()}）`,
+            '1. 调用 `restore-handoff` 工具读取完整恢复包',
+            '2. 按恢复包继续任务，不要重新扫描项目',
+            INJECT_MARK,
+          ].join('\n'));
+        }
       }
 
       if (injections.length) {
@@ -906,14 +1191,43 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
 
     'experimental.session.compacting': async (_input, output) => {
       try {
-        const mem = memoryDir(directory);
-        if (!fs.existsSync(mem)) return;
-        const summary = loadIndexSummary(mem);
-        const handoff = readOrEmpty(path.join(mem, 'HANDOFF.md'));
-        const parts = ['## junsi-dev-toolkit 记忆上下文', summary];
-        if (handoff) {
-          parts.push('', '### HANDOFF（自包含恢复包）', handoff.slice(0, 1500));
+        const parts = ['## junsi-dev-toolkit 记忆上下文'];
+        const up = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+        if (up.trim()) {
+          parts.push('', '### 全局用户偏好（跨项目生效）', up.slice(0, MEMORY_LIMITS.compactPreference));
         }
+        const mem = memoryDir(directory);
+        if (!fs.existsSync(mem)) {
+          if (parts.length > 1) output.context.push(parts.join('\n'));
+          return;
+        }
+        const idx = readOrEmpty(path.join(mem, 'INDEX.md'));
+        if (idx) parts.push('', '### 任务索引', idx.slice(0, MEMORY_LIMITS.compactIndex));
+        const recent = listRecentDecisions(mem, MEMORY_LIMITS.compactDecision);
+        if (recent.length) {
+          const cards = recent
+            .map((f) => {
+              const c = readOrEmpty(path.join(mem, 'decisions', f));
+              return `- **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 6).join('\n')}`;
+            })
+            .join('\n---\n');
+          parts.push('', '### 关键决策画像（最近 ' + recent.length + ' 条，需决策依据时读取全文）', cards);
+        }
+        const gDecDir = path.join(userMemoryDir(), 'decisions');
+        if (fs.existsSync(gDecDir)) {
+          const gRecent = fs.readdirSync(gDecDir).filter((f) => f.endsWith('.md')).sort().reverse().slice(0, MEMORY_LIMITS.compactDecision);
+          if (gRecent.length) {
+            const cards = gRecent
+              .map((f) => {
+                const c = readOrEmpty(path.join(gDecDir, f));
+                return `- 🌐 **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 5).join('\n')}`;
+              })
+              .join('\n---\n');
+            parts.push('', '### 全局决策画像（跨项目，最近 ' + gRecent.length + ' 条）', cards);
+          }
+        }
+        const handoff = readOrEmpty(path.join(mem, 'HANDOFF.md'));
+        if (handoff) parts.push('', '### HANDOFF（自包含恢复包，前 ' + MEMORY_LIMITS.compactHandoff + ' 字）', handoff.slice(0, MEMORY_LIMITS.compactHandoff));
         output.context.push(parts.join('\n'));
       } catch {
         // 压缩注入失败不阻塞
@@ -924,14 +1238,28 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
       if (!event || event.type !== 'session.idle') return;
       try {
         const mem = ensureMemoryDir(directory);
+        const recent = listRecentDecisions(mem, 3);
+        const progress = readOrEmpty(path.join(mem, 'progress', 'current.md'));
+        const handoff = fs.existsSync(path.join(mem, 'HANDOFF.md'));
         const sessionFile = path.join(mem, 'sessions', `${timestamp()}.md`);
-        if (!fs.existsSync(sessionFile)) {
-          fs.writeFileSync(
-            sessionFile,
-            ['# 会话痕迹', `- 时间：${new Date().toISOString()}`, '- 类型：session.idle 自动记录', ''].join('\n'),
-            'utf8'
-          );
-        }
+        fs.writeFileSync(
+          sessionFile,
+          [
+            '# 会话痕迹',
+            `- 时间：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+            `- 类型：session.idle 自动记录`,
+            `- 决策：${decisionFiles(mem).length} 条`,
+            `- HANDOFF：${handoff ? '就绪' : '无'}`,
+            '',
+            '## 进度摘要',
+            progress ? progress.split('\n').slice(0, 8).join('\n') : '（无）',
+            '',
+            '## 决策摘要',
+            recent.length ? recent.map((f) => `- ${readDecisionTitle(readOrEmpty(path.join(mem, 'decisions', f)), f)}`).join('\n') : '（无）',
+            '',
+          ].join('\n'),
+          'utf8'
+        );
       } catch {
         // idle 记录失败不阻塞
       }
