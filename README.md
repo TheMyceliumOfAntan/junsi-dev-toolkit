@@ -64,6 +64,21 @@
 
 MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 
+### Agent 自动化安装（Prompt 模板）
+
+把下面这段 prompt 原样发给任意 AI 助手（opencode / Claude Code / Cursor / Codex），让它自动完成安装与校验：
+
+````text
+你是安装助手。请在本机自动安装/升级 junsi-dev-toolkit（v3.1）：
+1. 定位 OpenCode 配置文件（全局 ~/.config/opencode/ 或项目根目录下的 opencode.json / opencode.jsonc）
+2. 检查 plugin 数组中是否已包含 "junsi-dev-toolkit"；未包含则在末尾追加 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"（本地克隆存在时用绝对路径代替）
+3. 运行 `pwsh scripts/verify-install.ps1 -RepoPath <本仓库路径>` 检验安装副本（任一项 FAIL 说明旧版或损坏）：FAIL 时先删除旧安装副本（opencode 缓存 packages 目录或 node_modules 下的 junsi-dev-toolkit），再重新安装插件或 git pull 后重装，重跑验证直到全部 PASS
+4. 验证通过后输出摘要（工具数 12、子技能数、仓库 hash 是否一致），并提醒用户"重启 OpenCode 后生效"
+约束：只改动 OpenCode 配置与本工具包安装副本，不得改动其他项目配置；配置存在冲突或不确定时先询问用户。
+````
+
+> 提示：给 opencode 发此 prompt 后，它会在验证阶段自动运行 `scripts/verify-install.ps1` 并粘贴输出；全部 PASS 才算安装成功。
+
 ### 可选：浏览器自动化（computer-use）
 
 `computer-use` 子技能依赖 playwright MCP，在 `opencode.json` 添加后重启：
