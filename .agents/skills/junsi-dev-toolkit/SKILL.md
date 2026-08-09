@@ -16,7 +16,9 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 | 最高 | 集群/多agent/并行分工/多模型 | `cluster` |
 | 次高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |
 | 中高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |
+| 中上 | advisor/顾问/权衡/利弊/方案对比/选哪个/优缺点 | `advisor` |
 | 中 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |
+| 中下 | computer_use/操作电脑/桌面自动化/浏览器自动化 | `computer-use` |
 | 中低 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |
 | 最低 | 添加/新增/实现/优化/重构/改进/加个新功能/页面/接口/组件 | `requirements-driven-dev` |
 
@@ -74,6 +76,13 @@ HANDOFF恢复(自动) → 路由宣告 → MCP定范围(直接调MCP工具)
 
 工具不可用（依赖未装）时按 `memory-skill/SKILL.md` 约定格式手工写 `.memory/` 文件。
 
+## 实用工具（插件注册，直接调用）
+
+| 工具 | 触发时机 |
+|------|---------|
+| `tool-search` | 不知道用哪个工具完成任务时 / 用户说"找工具、用哪个" |
+| `cron-create` | 用户说"定时提醒/每天执行/计划任务"（Windows schtasks） |
+
 ## 文档强制规则
 
 涉及 API、架构、UI、行为变更 → **必须**调用 project-docs 的 `update_doc`/`create_adr`，禁止自己乱写文档。各子技能完成清单已含此强制项，缺一项不得宣称完成。
@@ -85,7 +94,9 @@ HANDOFF恢复(自动) → 路由宣告 → MCP定范围(直接调MCP工具)
 | `cluster` | `./cluster/SKILL.md` |
 | `code-migrater` | `./code-migrater/SKILL.md` |
 | `diagnose-before-fix` | `./diagnose-before-fix/SKILL.md` |
+| `advisor` | `./advisor/SKILL.md` |
 | `requirements-driven-dev` | `./requirements-driven-dev/SKILL.md` |
+| `computer-use` | `./computer-use/SKILL.md` |
 | `project-docs` | `./project-docs/SKILL.md` |
 | `memory-skill` | `./memory-skill/SKILL.md` |
 

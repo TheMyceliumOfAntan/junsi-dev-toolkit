@@ -30,6 +30,7 @@ const expected = [
   'store-decision', 'save-progress', 'prepare-handoff', 'restore-handoff',
   'list-decisions', 'memory-doctor', 'save-preference',
   'cluster-task-prompt', 'cluster-scan-models', 'cluster-allocation',
+  'tool-search', 'cron-create',
 ];
 
 let JunsiDevToolkitPlugin;

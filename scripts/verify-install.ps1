@@ -8,9 +8,9 @@ junsi-dev-toolkit 安装/升级通用检验工具。
   1. 包目录与关键文件完整性
   2. 插件 JS 语法（node --check）
   3. 版本标记（SKILL.md v3 / 7 个 memory 工具）
-  4. 全部工具名是否在插件源码中注册（7 memory + 3 cluster）
+  4. 全部工具名是否在插件源码中注册（7 memory + 3 cluster + 2 utility）
   5. 与源码仓库 HEAD 的 hash 一致性（-RepoPath 提供时）
-  6. -Full：真实加载插件，断言 10 个工具全部注册 + memory-doctor 冒烟执行
+  6. -Full：真实加载插件，断言 12 个工具全部注册 + memory-doctor 冒烟执行
 
 .PARAMETER PackagePath
 已安装包目录（node_modules/junsi-dev-toolkit）。留空自动查找常见安装位置。
@@ -82,7 +82,9 @@ $required = @(
   (Join-Path $skillRoot 'memory-skill/templates/INDEX.md'),
   (Join-Path $skillRoot 'memory-skill/templates/HANDOFF.md'),
   (Join-Path $skillRoot 'requirements-driven-dev/SKILL.md'),
-  (Join-Path $skillRoot 'cluster/SKILL.md')
+  (Join-Path $skillRoot 'cluster/SKILL.md'),
+  (Join-Path $skillRoot 'advisor/SKILL.md'),
+  (Join-Path $skillRoot 'computer-use/SKILL.md')
 )
 foreach ($f in $required) { Check (Test-Path $f) "文件存在: $([IO.Path]::GetFileName($f))" }
 
@@ -108,7 +110,8 @@ $pluginSrc = Get-Content $plugin -Raw
 $tools = @(
   'store-decision', 'save-progress', 'prepare-handoff', 'restore-handoff',
   'list-decisions', 'memory-doctor', 'save-preference',
-  'cluster-task-prompt', 'cluster-scan-models', 'cluster-allocation'
+  'cluster-task-prompt', 'cluster-scan-models', 'cluster-allocation',
+  'tool-search', 'cron-create'
 )
 foreach ($t in $tools) {
   Check ($pluginSrc -match ("tools\['" + [Regex]::Escape($t) + "'\]")) "工具注册: $t"
@@ -149,7 +152,7 @@ if ($Full) {
     if (Test-Path $verify) {
       $out = & node $verify $pkg $proj 2>&1
       Write-Host $out
-      Check ($LASTEXITCODE -eq 0) '深度注册验证（10 工具 + memory-doctor 冒烟）'
+      Check ($LASTEXITCODE -eq 0) '深度注册验证（12 工具 + memory-doctor 冒烟）'
     } else {
       Check $false "缺少 $verify"
     }

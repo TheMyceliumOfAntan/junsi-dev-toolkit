@@ -1,5 +1,5 @@
 /**
- * junsi-dev-toolkit plugin for OpenCode.ai (v2.2)
+ * junsi-dev-toolkit plugin for OpenCode.ai (v3.1)
  *
  * - 代码级意图路由：关键词正则匹配用户消息，命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告
  * - 未匹配到开发意图（纯问答）→ 零注入（省 token）
@@ -7,6 +7,9 @@
  * - memory 自定义工具：store-decision / save-progress / prepare-handoff / restore-handoff / list-decisions / memory-doctor / save-preference
  * - Cluster 模式：config hook 注入 cluster 主 agent + 5 个专精 subagent（模型按本机可用性动态降级）
  *   + cluster-scan-models / cluster-allocation 工具（动态检测 + 分配方案，需用户确认）
+ * - 实用工具：tool-search（工具索引检索）/ cron-create（Windows 计划任务）
+ * - 决策顾问路由：advisor（权衡矩阵 + question 确认）
+ * - 浏览器自动化路由：computer-use（playwright MCP 操作闭环）
  * - 会话压缩钩子：自动注入 .memory 索引与 HANDOFF 摘要
  * - session.idle 钩子：空闲时自动初始化 .memory 骨架 + 记录会话痕迹
  */
@@ -43,11 +46,25 @@ const ROUTES = [
     keywords: ['报错', '不对', '不工作', '返回错误', '空列表', '崩溃', '白屏', 'bug', '异常', '闪退'],
   },
   {
+    id: 'advisor',
+    priority: 3.5,
+    skillPath: '.agents/skills/junsi-dev-toolkit/advisor/SKILL.md',
+    summary: '决策顾问：多方案权衡矩阵 → 明确推荐 + question 确认（复杂决策专用）',
+    keywords: ['advisor', '顾问', '权衡', '利弊', '方案对比', '对比方案', '选哪个', '哪个方案', '优缺点', 'compare'],
+  },
+  {
     id: 'memory-skill',
     priority: 3,
     skillPath: '.agents/skills/junsi-dev-toolkit/memory-skill/SKILL.md',
     summary: '决策记忆 / 进度保存 / HANDOFF 跨会话恢复（.memory/ 目录）',
     keywords: ['记住', '记录', '记一下', '决策', '保存进度', '换会话', '降智', '上下文不够', '恢复进度', '有哪些决策', '决策历史', '回顾决策', '健康审计', '记忆体检'],
+  },
+  {
+    id: 'computer-use',
+    priority: 2.5,
+    skillPath: '.agents/skills/junsi-dev-toolkit/computer-use/SKILL.md',
+    summary: '计算机操作/浏览器自动化：playwright MCP 配置 + 截图→操作→验证闭环',
+    keywords: ['computer_use', 'computer use', '操作电脑', '桌面自动化', '模拟鼠标', '模拟键盘', '浏览器自动化', '控制浏览器', '自动操作浏览器'],
   },
   {
     id: 'project-docs',
@@ -1110,6 +1127,92 @@ const registerClusterTools = async (tools, skillsDir) => {
   return { ok: true };
 };
 
+/* ---------- 实用工具：tool-search + cron-create ---------- */
+
+const TOOL_INDEX = [
+  { id: 'bash', use: '执行终端命令（构建/测试/git/安装）' },
+  { id: 'read/write/edit/apply_patch', use: '读写与修改文件' },
+  { id: 'grep/glob', use: '内容正则搜索 / 文件名模式搜索' },
+  { id: 'webfetch/websearch', use: '抓取网页 / 网络搜索' },
+  { id: 'question', use: '向用户提问澄清需求或确认方案' },
+  { id: 'todowrite', use: '多步骤任务待办清单' },
+  { id: 'task', use: '派发子代理（独立子任务）' },
+  { id: 'skill', use: '加载技能（SKILL.md 工作流）' },
+  { id: 'store-decision', use: '阶段确认后记录决策' },
+  { id: 'save-progress', use: '任务完成保存进度' },
+  { id: 'prepare-handoff/restore-handoff', use: '跨会话恢复（换会话时）' },
+  { id: 'list-decisions/memory-doctor/save-preference', use: '决策回顾/记忆体检/全局偏好' },
+  { id: 'cluster-task-prompt/cluster-scan-models/cluster-allocation', use: 'Cluster 多模型并行开发' },
+  { id: 'tool-search', use: '本工具：按关键词找最合适的工具' },
+  { id: 'cron-create', use: '创建/列出/删除 Windows 计划任务' },
+  { id: 'MCP project-docs_*', use: '项目文档/代码感知（架构/API/组件/路由）' },
+  { id: 'MCP glm-vision_*', use: '图片理解/OCR（视觉分析）' },
+];
+
+const registerUtilityTools = async (tools) => {
+  let tool;
+  try {
+    ({ tool } = await import('@opencode-ai/plugin'));
+  } catch (e) {
+    return { ok: false, error: `@opencode-ai/plugin 不可用，跳过实用工具: ${e.message}` };
+  }
+  const schema = tool.schema;
+
+  tools['tool-search'] = tool({
+    description: '按关键词在工具索引中模糊检索，返回最合适工具 + 使用时机。当不知道用哪个工具完成任务时调用。',
+    args: { keyword: schema.string().describe('任务描述或关键词，如"搜索文件""保存进度"') },
+    async execute(args) {
+      const kw = (args.keyword || '').trim().toLowerCase();
+      const all = TOOL_INDEX.map((t) => `- \`${t.id}\`：${t.use}`).join('\n');
+      if (!kw) return `## 工具索引\n\n${all}`;
+      const hits = TOOL_INDEX.filter((t) => `${t.id} ${t.use}`.toLowerCase().includes(kw));
+      return hits.length
+        ? `## 匹配工具（${kw}）\n\n${hits.map((t) => `- \`${t.id}\`：${t.use}`).join('\n')}`
+        : `无匹配工具（关键词：${kw}）。\n\n## 工具索引\n\n${all}`;
+    },
+  });
+
+  tools['cron-create'] = tool({
+    description: '创建/列出/删除 Windows 计划任务（schtasks 封装）。用户说"定时提醒/每天执行/定时任务"时调用。',
+    args: {
+      action: schema.enum(['create', 'list', 'delete']).describe('操作：create=创建 / list=列出 / delete=删除'),
+      taskName: schema.string().optional().describe('任务名（create/delete 必填）'),
+      command: schema.string().optional().describe('要执行的命令（create 必填），如 "node D:\\task.js"'),
+      schedule: schema.string().optional().describe('触发计划（create 必填）："频次 时间"，如 "DAILY 09:00" / "ONCE 14:30"'),
+      startDate: schema.string().optional().describe('开始日期 YYYY/MM/DD（默认今天）'),
+    },
+    async execute(args) {
+      const { execFileSync } = await import('child_process');
+      const { TextDecoder } = await import('util');
+      const gbk = new TextDecoder('gbk', { fatal: false });
+      const run = (argList) => {
+        try {
+          const buf = execFileSync('schtasks.exe', argList, { encoding: 'buffer', windowsHide: true });
+          return gbk.decode(buf).trim();
+        } catch (e) {
+          return `执行失败: ${e.message}`;
+        }
+      };
+      if (args.action === 'list') {
+        const out = run(['/Query', '/FO', 'LIST', '/V']);
+        const lines = out.split(/\r?\n/).filter((l) => /任务名|TaskName|状态|Status|下次运行时间|Next Run Time/i.test(l));
+        return lines.length ? lines.join('\n') : out;
+      }
+      if (args.action === 'delete') {
+        if (!args.taskName) return 'delete 需要 taskName';
+        return run(['/Delete', '/TN', args.taskName, '/F']);
+      }
+      if (!args.taskName || !args.command) return 'create 需要 taskName 与 command';
+      const [freq, time] = (args.schedule || 'DAILY 09:00').split(/\s+/);
+      const argList = ['/Create', '/TN', args.taskName, '/TR', args.command, '/SC', freq, '/ST', time];
+      if (args.startDate) argList.push('/SD', args.startDate);
+      return run(argList);
+    },
+  });
+
+  return { ok: true };
+};
+
 export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
   const skillsDir = path.resolve(__dirname, '../../.agents/skills/junsi-dev-toolkit');
   const tools = {};
@@ -1120,6 +1223,10 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
   const clusterState = await registerClusterTools(tools, skillsDir);
   if (!clusterState.ok) {
     client.app.log({ service: 'junsi-dev-toolkit', level: 'warn', message: clusterState.error });
+  }
+  const utilityState = await registerUtilityTools(tools);
+  if (!utilityState.ok) {
+    client.app.log({ service: 'junsi-dev-toolkit', level: 'warn', message: utilityState.error });
   }
 
   return {

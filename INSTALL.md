@@ -54,6 +54,22 @@ pip install mcp pydantic
 
 ### 5. 重启 AI 工具
 
+## 浏览器自动化（computer-use，可选）
+
+`opencode.json` 添加 playwright MCP 后重启：
+
+```json
+{
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp@latest"],
+      "enabled": true
+    }
+  }
+}
+```
+
 ## 验证
 
-对 AI 说"帮我查一下项目文档"或"加个功能"，如果能自动路由到对应子技能，说明安装成功。
+对 AI 说"帮我查一下项目文档"或"加个功能"，如果能自动路由到对应子技能，说明安装成功。新工具验证：说"找一下处理文件的工具"（应触发 `tool-search`）；说"权衡一下这两个方案"（应路由到 `advisor`）。

@@ -1,8 +1,13 @@
 # Junsi Dev Toolkit
 
-> 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群。
+> 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群、决策顾问、浏览器自动化。
 
-## v3.0 核心能力
+## v3.1 核心能力
+
+- **决策顾问（advisor）**：多方案权衡矩阵 → 明确推荐 → question 确认 → store-decision 落地，覆盖"哪个方案好/怎么选"类复杂决策。
+- **浏览器自动化（computer-use）**：playwright MCP 操作闭环（截图 → 定位 → 操作 → 验证），含 opencode.json 配置模板。
+- **工具检索（tool-search）**：内置工具索引，按关键词返回最合适工具 + 使用时机，解决"不知道用哪个工具"。
+- **定时任务（cron-create）**：Windows 计划任务（schtasks）创建/列出/删除，支持"定时提醒/每天执行"。
 
 - **Cluster 模式（Agent 集群）**：主 Agent（`cluster`，Tab 切换）总体规划 → **动态检测本机可用模型**（`cluster-scan-models`，读 auth.json + 环境变量）→ 生成任务块→专精模型分配方案（`cluster-allocation`）→ **question 工具问用户确认** → 派发给 5 个专精 Subagent 并行执行 → 汇总验证。Subagent 模型按本机可用性自动降级。
 - **代码级路由 + 子技能全文注入**：插件用关键词正则匹配用户消息（含"优化/重构/改进/集群"等），命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告（`📌 路由宣告: {id}`）+ 强制完成清单；纯问答零注入，省 token。
@@ -23,6 +28,10 @@
 | **requirements-driven-dev** | 新功能开发（澄清 -> 实现 -> 验证） | 添加、新增、实现 |
 | **project-docs** | 项目知识中枢（15个MCP代码感知工具） | 文档、规范、ADR、API、路由 |
 | **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
+| **advisor** | 决策顾问（权衡矩阵 + 推荐 + 确认） | 顾问、权衡、方案对比、选哪个 |
+| **computer-use** | 浏览器自动化（playwright MCP 操作闭环） | computer_use、操作电脑、浏览器自动化 |
+| **tool-search** | 工具索引检索（找最合适工具） | 找工具、用哪个工具 |
+| **cron-create** | Windows 计划任务（schtasks） | 定时提醒、每天执行、计划任务 |
 
 ## Cluster 模式
 
@@ -55,10 +64,35 @@
 
 MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 
+### 可选：浏览器自动化（computer-use）
+
+`computer-use` 子技能依赖 playwright MCP，在 `opencode.json` 添加后重启：
+
+```json
+{
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp@latest"],
+      "enabled": true
+    }
+  }
+}
+```
+
+未配置时触发该路由只会得到配置指引，不会报错；不使用时也可不装。桌面级操作（整个屏幕 + 鼠标键盘）可另配 Anthropic `@anthropic-ai/mcp-server-computer-use`（见 `computer-use` 子技能）。
+
+### 可选：环境变量开关
+
+| 能力 | 开关 | 说明 |
+|:---|:---|:---|
+| `websearch` 网络搜索 | `OPENCODE_ENABLE_EXA=1` | 启动前设置环境变量 |
+| `lsp` 代码智能 | `OPENCODE_EXPERIMENTAL_LSP_TOOL=true` | 启动前设置环境变量 |
+
 ## 验证安装 / 升级
 
 ```powershell
-# 快速检验：自动定位安装副本，检查文件完整性/语法/版本标记/10 工具注册
+# 快速检验：自动定位安装副本，检查文件完整性/语法/版本标记/12 工具注册
 pwsh scripts/verify-install.ps1
 
 # 与源码仓库对比（hash 一致性，确认已升级到最新）
@@ -68,7 +102,7 @@ pwsh scripts/verify-install.ps1 -RepoPath <仓库路径>
 pwsh scripts/verify-install.ps1 -Full
 ```
 
-任一项 FAIL 即未安装成功或未升级到位；全部 PASS 表示新会话即可使用。旧版安装副本会如实报 FAIL（如缺 `list-decisions`、hash 不一致），提示重新安装。
+任一项 FAIL 即未安装成功或未升级到位；全部 PASS 表示新会话即可使用。旧版安装副本会如实报 FAIL（如缺 `tool-search`/`cron-create`、缺 `advisor`/`computer-use` 子技能文件、hash 不一致），提示重新安装。
 
 ## 架构
 
@@ -93,6 +127,9 @@ pwsh scripts/verify-install.ps1 -Full
 | 保存进度 | "记一下做到哪了" |
 | 回顾决策 | "有哪些决策" / "回顾决策" |
 | 记忆体检 | "健康审计" / "记忆体检" |
+| 决策权衡 | "这两个方案怎么选" / "权衡一下利弊" |
+| 浏览器操作 | "帮我打开网页点一下这个按钮" |
+| 定时任务 | "每天早上 9 点执行这个脚本" |
 
 ## 许可
 
