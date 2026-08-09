@@ -24,7 +24,7 @@
 |:---|:---|:---|
 | **cluster** | Agent 集群：主控统筹 + 专精模型 Subagent 并行 | 集群、多agent、并行分工 |
 | **code-migrater** | 跨语言/跨框架代码移植 | 移植、迁移、migrate |
-| **diagnose-before-fix** | Bug 修复（8步流程 + 原始复测） | 报错、不工作、崩溃、白屏 |
+| **diagnose-before-fix** | Bug 修复（证据优先：基线/三档证据/探针/回归验证会失败） | 报错、不工作、崩溃、白屏 |
 | **requirements-driven-dev** | 新功能开发（澄清 -> 实现 -> 验证） | 添加、新增、实现 |
 | **project-docs** | 项目知识中枢（15个MCP代码感知工具） | 文档、规范、ADR、API、路由 |
 | **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
