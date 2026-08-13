@@ -70,6 +70,8 @@ pip install mcp pydantic
 }
 ```
 
+> 桌面级操作（整个屏幕 + 鼠标键盘）需另配第三方 computer-use MCP（如 `@zavora-ai/computer-use-mcp`，experimental）。⚠️ Anthropic 官方未发布 npm 包，`@anthropic-ai/mcp-server-computer-use` 在 registry 不存在（404），详见 `computer-use` 子技能。
+
 ## 验证
 
 对 AI 说"帮我查一下项目文档"或"加个功能"，如果能自动路由到对应子技能，说明安装成功。新工具验证：说"找一下处理文件的工具"（应触发 `tool-search`）；说"权衡一下这两个方案"（应路由到 `advisor`）。

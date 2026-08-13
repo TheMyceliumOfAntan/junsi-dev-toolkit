@@ -96,7 +96,7 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 }
 ```
 
-未配置时触发该路由只会得到配置指引，不会报错；不使用时也可不装。桌面级操作（整个屏幕 + 鼠标键盘）可另配 Anthropic `@anthropic-ai/mcp-server-computer-use`（见 `computer-use` 子技能）。
+未配置时触发该路由只会得到配置指引，不会报错；不使用时也可不装。桌面级操作（整个屏幕 + 鼠标键盘）可另配第三方 computer-use MCP，如 `@zavora-ai/computer-use-mcp`（experimental，见 `computer-use` 子技能；注意 Anthropic 官方未发布 npm 包，`@anthropic-ai/mcp-server-computer-use` 在 registry 不存在）。
 
 ### 可选：环境变量开关
 

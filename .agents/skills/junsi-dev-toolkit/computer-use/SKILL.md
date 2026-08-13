@@ -25,21 +25,21 @@ description: 计算机操作/浏览器自动化。用户要操作电脑（模拟
 
 ### 桌面级操作（备选 MCP）
 
-playwright 只覆盖浏览器。需要操作整个桌面（屏幕截图 + 鼠标键盘移动整个系统）时，可换 Anthropic 官方 computer-use MCP（跨平台，experimental）：
+playwright 只覆盖浏览器。需要操作整个桌面（屏幕截图 + 鼠标键盘移动整个系统）时，可配第三方 computer-use MCP（experimental）。⚠️ **Anthropic 官方未发布过 npm 包**：`@anthropic-ai/mcp-server-computer-use` 在 registry 返回 404，切勿使用该包名。可选社区实现如 `@zavora-ai/computer-use-mcp`（跨平台 macOS/Windows/Linux，Rust 原生模块）：
 
 ```json
 {
   "mcp": {
     "computer-use": {
       "type": "local",
-      "command": ["npx", "@anthropic-ai/mcp-server-computer-use@latest"],
+      "command": ["npx", "-y", "@zavora-ai/computer-use-mcp@latest"],
       "enabled": true
     }
   }
 }
 ```
 
-两个 MCP 可并存：浏览器任务用 `playwright`，桌面任务用 `computer-use`。桌面操作同样遵守下方"操作闭环"（先截图 → 操作 → 验证）。
+两个 MCP 可并存：浏览器任务用 `playwright`，桌面任务用 `computer-use`。桌面操作同样遵守下方"操作闭环"（先截图 → 操作 → 验证）。第三方包为社区维护，启用前自行评估风险。
 
 ## 操作闭环（每次操作必须遵守）
 
