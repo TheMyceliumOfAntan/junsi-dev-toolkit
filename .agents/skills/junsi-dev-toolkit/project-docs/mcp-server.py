@@ -1,4 +1,4 @@
-#!C:\Users\JunSi\AppData\Local\Programs\Python\Python313\python.exe
+#!/usr/bin/env python3
 """
 project-docs MCP Server
 项目知识中枢 + 代码感知工具集 — 不仅管文档，还帮你读懂实际项目。
