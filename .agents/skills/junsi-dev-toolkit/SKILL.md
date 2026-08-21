@@ -19,6 +19,7 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 | 中上 | advisor/顾问/权衡/利弊/方案对比/选哪个/优缺点 | `advisor` |
 | 中 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |
 | 中下 | computer_use/操作电脑/桌面自动化/浏览器自动化 | `computer-use` |
+| 中低 | 渗透测试/pentest/安全测试/漏洞扫描（OWASP WSTG） | `penetration-testing` |
 | 中低 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |
 | 最低 | 添加/新增/实现/优化/重构/改进/加个新功能/页面/接口/组件 | `requirements-driven-dev` |
 
@@ -98,6 +99,7 @@ HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → MCP定�
 | `advisor` | `./advisor/SKILL.md` |
 | `requirements-driven-dev` | `./requirements-driven-dev/SKILL.md` |
 | `computer-use` | `./computer-use/SKILL.md` |
+| `penetration-testing` | `./penetration-testing/SKILL.md` |
 | `project-docs` | `./project-docs/SKILL.md` |
 | `memory-skill` | `./memory-skill/SKILL.md` |
 

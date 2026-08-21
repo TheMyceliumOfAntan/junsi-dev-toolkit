@@ -67,6 +67,13 @@ const ROUTES = [
     keywords: ['computer_use', 'computer use', '操作电脑', '桌面自动化', '模拟鼠标', '模拟键盘', '浏览器自动化', '控制浏览器', '自动操作浏览器'],
   },
   {
+    id: 'penetration-testing',
+    priority: 2.4,
+    skillPath: '.agents/skills/junsi-dev-toolkit/penetration-testing/SKILL.md',
+    summary: 'Web 安全渗透测试（OWASP WSTG）：先确认黑/灰/白盒与授权，再经 WSL 工具按 8 阶段执行并出报告',
+    keywords: ['渗透测试', '渗透', 'pentest', '安全测试', '漏洞扫描', 'wstg', 'sqlmap', 'nmap', 'nikto', 'web安全'],
+  },
+  {
     id: 'project-docs',
     priority: 2,
     skillPath: '.agents/skills/junsi-dev-toolkit/project-docs/SKILL.md',
@@ -158,6 +165,7 @@ const buildFullRoutingTable = () => {
     '| 次高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |',
     '| 中高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |',
     '| 中 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |',
+    '| 中低 | 渗透测试/pentest/安全测试/漏洞扫描（OWASP WSTG） | `penetration-testing` |',
     '| 中低 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |',
     '| 最低 | 添加/新增/实现/优化/重构/改进/加个新功能/页面/接口/组件 | `requirements-driven-dev` |',
     '纯知识问答不触发路由。同时匹配多项取优先级最高。',

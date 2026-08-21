@@ -84,7 +84,8 @@ $required = @(
   (Join-Path $skillRoot 'requirements-driven-dev/SKILL.md'),
   (Join-Path $skillRoot 'cluster/SKILL.md'),
   (Join-Path $skillRoot 'advisor/SKILL.md'),
-  (Join-Path $skillRoot 'computer-use/SKILL.md')
+  (Join-Path $skillRoot 'computer-use/SKILL.md'),
+  (Join-Path $skillRoot 'penetration-testing/SKILL.md')
 )
 foreach ($f in $required) { Check (Test-Path $f) "文件存在: $([IO.Path]::GetFileName($f))" }
 

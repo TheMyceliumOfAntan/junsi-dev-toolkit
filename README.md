@@ -31,6 +31,7 @@
 | **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
 | **advisor** | 决策顾问（权衡矩阵 + 推荐 + 确认） | 顾问、权衡、方案对比、选哪个 |
 | **computer-use** | 浏览器自动化（playwright MCP 操作闭环） | computer_use、操作电脑、浏览器自动化 |
+| **penetration-testing** | Web 安全渗透测试（OWASP WSTG 8 阶段，WSL 工具，先确认授权与黑/灰/白盒） | 渗透测试、pentest、安全测试、漏洞扫描 |
 | **tool-search** | 工具索引检索（找最合适工具） | 找工具、用哪个工具 |
 | **cron-create** | Windows 计划任务（schtasks） | 定时提醒、每天执行、计划任务 |
 
@@ -145,6 +146,7 @@ pwsh scripts/verify-install.ps1 -Full
 | 记忆体检 | "健康审计" / "记忆体检" |
 | 决策权衡 | "这两个方案怎么选" / "权衡一下利弊" |
 | 浏览器操作 | "帮我打开网页点一下这个按钮" |
+| 渗透测试 | "对 https://example.com 做渗透测试"（仅限已授权目标） |
 | 定时任务 | "每天早上 9 点执行这个脚本" |
 
 ## 许可
