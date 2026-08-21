@@ -33,10 +33,11 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 ## 工作流
 
 ```
-HANDOFF恢复(自动) → 路由宣告 → MCP定范围(直接调MCP工具)
+HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → MCP定范围(直接调MCP工具)
   → 读子技能SKILL.md → 执行 → 更新文档 → 保存进度
 ```
 
+- **远程更新预检（各子技能必备前置）**：动手前先 `git fetch` + 查远程分支 `git log`/近期提交/`CHANGELOG`/`Release Notes`（可 `web_search` 查上游 issue/PR/发布说明），确认用户提出的问题/需求是否已被上游最新版实现或修复。**若已实现/已修复** → 提示用户"上游已提供（版本/提交 X），建议升级/改用/拉新"，给出依据，不重复实现/修复；仅当升级不适用时再自研。加功能（`requirements-driven-dev`）、修 Bug（`diagnose-before-fix`）、移植（`code-migrater`）三个子技能都把此项列为前置 Gate 0。
 - **HANDOFF 恢复**：新会话插件检测 `.memory/HANDOFF.md`，自动注入恢复指令，先调 `restore-handoff` 工具。
 - 降智/上下文将满 → 生成 HANDOFF（调 `prepare-handoff` 工具）→ 提示开新会话。
 - 上下文压缩时插件自动注入 `.memory` 摘要。

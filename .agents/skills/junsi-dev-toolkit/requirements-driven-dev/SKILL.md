@@ -7,6 +7,16 @@ description: Use when the user wants to add a new feature or implement a new req
 
 三个强制阶段：**CLARIFY → IMPLEMENT → VERIFY**。
 
+## Gate 0：远程更新预检（动手前必做）
+
+在进入任何实现阶段前，先确认目标仓库/上游**最新版是否已经把本次需求实现了**，避免重复造轮子：
+
+- `git fetch` 拉到最新远程，`git log origin/<分支>` 看近期提交，重点查 `CHANGELOG`/`Release Notes`/PR 标题里是否提到本需求关键词（功能名、特性、能力）。
+- 可 `web_search` 查上游 issue/PR/发布说明确认是否已实现。
+- **若已实现/已合入**：不要重复实现；提示用户"上游已提供（版本/提交 X），建议升级/改用/拉取新版本"，并给出依据。必要时才协助做升级适配，而不是新写一套。
+- 若未实现或需求是本项目私有 → 正常进入 CLARIFY → IMPLEMENT → VERIFY。
+- 在阶段确认或最终总结里说明「已确认上游未实现/未包含，故自研」或「上游已实现，改用之」。
+
 ## Phase 1: CLARIFY
 
 - **依据 MCP 范围精细解析**：在路由层注入的范围内读代码、分析模式，不扫全文。提方案前先理解范围内现有实现。

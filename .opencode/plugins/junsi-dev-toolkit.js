@@ -136,10 +136,11 @@ const buildRouteInjection = (route, skillsDir) => {
     '- 要求：',
     `  1. 回复开头必须输出 \`📌 路由宣告: ${route.id}\`，未输出视为违规`,
     `  2. 严格遵守下方子技能流程（全文已注入，无需再读文件）`,
-    '  3. 涉及 API/架构/UI/行为变更 → 必须调用 project-docs 的 `update_doc`/`create_adr`，不得自己乱写文档',
-    '  4. 阶段确认后 → 必须调用 `store-decision`',
-    '  5. 任务完成 → 必须调用 `save-progress`',
-    '  6. 缺任何一项不得说"完成"',
+    '  3. 动手实现/修复前先做远程更新预检（Gate 0）：`git fetch` + 查上游提交/CHANGELOG/issue，确认上游未实现/未修复才自研；已实现则提示用户改用上游，不重复造轮子',
+    '  4. 涉及 API/架构/UI/行为变更 → 必须调用 project-docs 的 `update_doc`/`create_adr`，不得自己乱写文档',
+    '  5. 阶段确认后 → 必须调用 `store-decision`',
+    '  6. 任务完成 → 必须调用 `save-progress`',
+    '  7. 缺任何一项不得说"完成"',
     '',
     '## 子技能全文（必读必守）',
     '',
@@ -819,6 +820,7 @@ const pickModel = (models, candidates, { preference = 'balanced', domain, multim
 const CLUSTER_COMMON_RULES = `## 通用合规层（所有 Cluster Subagent 必须遵守，缺任何一项不得说"完成"）
 
 ### 完成清单（必须项）
+- [ ] 动手前已做远程更新预检：git fetch + 查上游提交/CHANGELOG/issue，确认上游未实现/未修复才自研（已实现 → 提示用户改用上游并停止该任务块）
 - [ ] 修改前已 checkpoint（git commit 或 stash）
 - [ ] Build/测试通过（实际运行命令并粘贴输出）
 - [ ] 原始场景复测通过（如适用）
