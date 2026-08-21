@@ -64,7 +64,7 @@ description: 基于 OWASP WSTG 标准的 Web 安全渗透测试工具包。先�
 
 ## 🔧 第二步：准备测试环境（WSL 工具）
 
-确认测试方式后，准备 WSL 渗透测试环境。
+确认测试方式后，准备渗透测试环境。执行后端自动适配：**Windows 经 WSL；Linux 等已带 bash 的系统直接本机执行（功能一致）**——下文 `wsl -e bash -c "..."` 在 Linux/macOS 上等价于直接在终端运行引号内命令。
 
 ### WSL 工具安装检查
 
@@ -116,6 +116,10 @@ pip3 install dirsearch
 echo '✅ 渗透工具安装完成'
 "
 ```
+
+### WSL 不可用时的回退
+
+工具报错 `WSL_NOT_AVAILABLE` 或 wsl 命令不存在时：先向用户**警告并确认是否继续**；继续则回退 pwsh 同类工具（端口扫描 `Test-NetConnection`、HTTP 指纹/安全头 `Invoke-WebRequest`、目录探测小字典限速循环），并在报告中标注"pwsh 回退执行"；sqlmap/nikto/hydra 无 pwsh 安全等价，标注"需 WSL"跳过，不得盲测。用户拒绝 → 建议安装 WSL 后再测。
 
 ---
 
@@ -248,7 +252,7 @@ wsl -e sqlmap -u "TARGET_URL/?id=1" --dump --batch
 
 ## 📝 第五步：生成报告
 
-测试完成后，生成完整的渗透测试报告。
+测试完成后，生成完整的渗透测试报告：将 Markdown 报告写入 `docs/penetration-reports/YYYY-MM-DD-<目标slug>.md`（项目根目录相对路径，日期取测试当日），并在回复中给出报告路径与风险摘要。
 
 ### 报告结构
 
@@ -276,7 +280,7 @@ wsl -e sqlmap -u "TARGET_URL/?id=1" --dump --batch
 - **证据**: [响应截图/关键信息]
 - **CVSS 评分**: [X.X]
 - **影响**: [可能造成的危害]
-- **修复建议**: [具体修复方案]
+- **建议解决方案**: [具体可执行的修复措施：配置修改步骤/代码级修复方向/需升级的依赖及目标版本，不许只写"建议加固"]
 
 ## 工具使用记录
 | 工具 | 命令 | 结果 |

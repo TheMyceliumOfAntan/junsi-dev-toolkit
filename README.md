@@ -1,8 +1,12 @@
 # Junsi Dev Toolkit
 
-> 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群、决策顾问、浏览器自动化。
+> 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群、决策顾问、浏览器自动化、渗透测试。
 
-## v3.2 核心能力
+> ⚠️ **本工具包是 OpenCode 插件**，依赖 `@opencode-ai/plugin` 的消息注入与工具注册机制。其他 Agent（Claude Code / Cursor / Codex 等）只能手动复制 `.agents/skills/` 下的子技能文本使用，路由注入 / Memory 工具 / Cluster / Penetration 模式等宿主能力**未经测试，不保证可用**。
+
+## v3.3 核心能力
+
+- **Penetration 渗透测试模式**：Tab 切换 `penetration` 专属会话，按 OWASP WSTG 8 阶段流程用 WSL 渗透工具执行测试；除 `docs/penetration-reports/` 报告外不写任何文件。配套 `wsl-pentest` MCP 服务器（零依赖 Node 脚本）封装 `wsl-run` / `wsl-tool-check` / `wsl-install` / `wsl-nmap` / `wsl-sqlmap` / `wsl-nikto` 六个工具（**必装**），未配置 MCP 自动回退 bash 执行 `wsl -e ...`。仅限已获授权目标。
 
 - **证据优先的 Bug 修复（diagnose-before-fix）**：融合对抗性审查流程 — 证据三档标签（已证明/已读证/潜在）、先立基线区分新旧问题、warning 免费 bug 索引、一次性探针、回归必须验证"没修复时会失败"、实测细则与反模式清单。
 - **决策顾问（advisor）**：多方案权衡矩阵 → 明确推荐 → question 确认 → store-decision 落地，覆盖"哪个方案好/怎么选"类复杂决策。
@@ -31,7 +35,8 @@
 | **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
 | **advisor** | 决策顾问（权衡矩阵 + 推荐 + 确认） | 顾问、权衡、方案对比、选哪个 |
 | **computer-use** | 浏览器自动化（playwright MCP 操作闭环） | computer_use、操作电脑、浏览器自动化 |
-| **penetration-testing** | Web 安全渗透测试（OWASP WSTG 8 阶段，WSL 工具，先确认授权与黑/灰/白盒） | 渗透测试、pentest、安全测试、漏洞扫描 |
+| **penetration-testing** | Web 安全渗透测试模式（OWASP WSTG 8 阶段，WSL 工具，先确认授权与黑/灰/白盒） | Tab 切换 `penetration` 会话（不走关键词路由） |
+| **wsl-pentest**（MCP） | WSL 渗透工具封装：wsl-run/tool-check/install/nmap/sqlmap/nikto（零依赖 Node 脚本，必装，见 INSTALL.md） | 由 AI 在渗透流程中直接调用 |
 | **tool-search** | 工具索引检索（找最合适工具） | 找工具、用哪个工具 |
 | **cron-create** | Windows 计划任务（schtasks） | 定时提醒、每天执行、计划任务 |
 
@@ -47,6 +52,14 @@
 | `cluster-docs` | 文档/ADR | GLM-5.2 |
 
 模型按本机实际配置（auth.json / 环境变量）自动检测注入；任务分配时用 `question` 工具向用户确认方案。
+
+## Penetration 模式
+
+Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8 阶段（信息收集 → 配置 → 认证 → 授权 → 输入验证 → 会话 → 业务逻辑 → 客户端）经 WSL 渗透工具执行；唯一允许的写入位置是 `docs/penetration-reports/`（Markdown 报告，命名 `YYYY-MM-DD-<目标slug>.md`），不碰项目源码。
+
+- **工具**：`wsl-pentest` MCP（**必装**，注册方法见 [INSTALL.md](INSTALL.md)）：`wsl-run` / `wsl-tool-check` / `wsl-install` / `wsl-nmap` / `wsl-sqlmap` / `wsl-nikto`；执行后端自动适配——Windows 经 WSL、Linux 等自带 bash 的系统直接本机 bash（功能一致）；未配置 MCP 时 Windows 回退 `wsl -e bash -c "<命令>"`、Linux 直接跑；本机无 WSL 时工具返回 `WSL_NOT_AVAILABLE`，AI 会警告并询问是否继续，同意后回退 pwsh 同类工具（`Test-NetConnection`/`Invoke-WebRequest` 等，sqlmap/nikto/hydra 无等价项标注"需 WSL"跳过）
+- **流程**：先 `question` 确认黑/灰/白盒与范围 → 环境检查/安装 → 分阶段执行 → （可选）攻击验证 → 报告落盘 + 回复摘要；报告每个漏洞必须含**建议解决方案**（具体可执行的配置修改/代码修复方向/依赖升级）
+- **授权硬门槛**：仅对已获书面授权的目标测试。渗透测试不走关键词路由，统一在 Penetration 会话执行
 
 ## 安装（OpenCode）
 
@@ -71,11 +84,12 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 把下面这段 prompt 原样发给任意 AI 助手（opencode / Claude Code / Cursor / Codex），让它自动完成安装与校验：
 
 ````text
-你是安装助手。请在本机自动安装/升级 junsi-dev-toolkit（v3.1）：
+你是安装助手。请在本机自动安装/升级 junsi-dev-toolkit（v3.3）：
 1. 定位 OpenCode 配置文件（全局 ~/.config/opencode/ 或项目根目录下的 opencode.json / opencode.jsonc）
 2. 检查 plugin 数组中是否已包含 "junsi-dev-toolkit"；未包含则在末尾追加 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"（本地克隆存在时用绝对路径代替）
-3. 运行 `pwsh scripts/verify-install.ps1 -RepoPath <本仓库路径>` 检验安装副本（任一项 FAIL 说明旧版或损坏）：FAIL 时先删除旧安装副本（opencode 缓存 packages 目录或 node_modules 下的 junsi-dev-toolkit），再重新安装插件或 git pull 后重装，重跑验证直到全部 PASS
-4. 验证通过后输出摘要（工具数 12、子技能数、仓库 hash 是否一致），并提醒用户"重启 OpenCode 后生效"
+3.【必装】检查 mcp 中是否已注册 "project-docs" 与 "wsl-pentest"（type=local，enabled=true，command 见 INSTALL.md：project-docs 用 python 跑 mcp-server.py，wsl-pentest 用 node 跑 penetration-testing/mcp-wsl-tools.mjs）；任一缺失则按 INSTALL.md 补齐。project-docs 是文档/代码感知中枢，wsl-pentest 是 Penetration 渗透模式依赖，均不允许跳过（另需确认前置：`pip install mcp pydantic`；Windows+WSL）
+4. 运行 `pwsh scripts/verify-install.ps1 -RepoPath <本仓库路径>` 检验安装副本（任一项 FAIL 说明旧版或损坏）。**升级一律整体重装**：删除旧安装副本（opencode 缓存 packages 目录或 node_modules 下的 junsi-dev-toolkit）后重新完整安装，禁止只改个别文件充当升级；git pull 后同样走删旧重装流程。重跑验证直到全部 PASS
+5. 验证通过后输出摘要（工具数 12、子技能数、仓库 hash 是否一致、wsl-pentest MCP 是否已注册），并提醒用户"重启 OpenCode 后生效"
 约束：只改动 OpenCode 配置与本工具包安装副本，不得改动其他项目配置；配置存在冲突或不确定时先询问用户。
 ````
 
@@ -119,7 +133,7 @@ pwsh scripts/verify-install.ps1 -RepoPath <仓库路径>
 pwsh scripts/verify-install.ps1 -Full
 ```
 
-任一项 FAIL 即未安装成功或未升级到位；全部 PASS 表示新会话即可使用。旧版安装副本会如实报 FAIL（如缺 `tool-search`/`cron-create`、缺 `advisor`/`computer-use` 子技能文件、hash 不一致），提示重新安装。
+任一项 FAIL 即未安装成功或未升级到位；全部 PASS 表示新会话即可使用。旧版安装副本会如实报 FAIL（如缺 `tool-search`/`cron-create`、缺 `advisor`/`computer-use` 子技能文件、hash 不一致），提示重新安装。**升级不要只改个别文件**——删旧副本后完整重装，避免漏装 MCP 等配套配置；校验脚本同时检测 opencode 配置中的 `wsl-pentest` MCP 注册状态（缺失输出 WARN）。
 
 ## 架构
 
@@ -146,7 +160,7 @@ pwsh scripts/verify-install.ps1 -Full
 | 记忆体检 | "健康审计" / "记忆体检" |
 | 决策权衡 | "这两个方案怎么选" / "权衡一下利弊" |
 | 浏览器操作 | "帮我打开网页点一下这个按钮" |
-| 渗透测试 | "对 https://example.com 做渗透测试"（仅限已授权目标） |
+| 渗透测试 | Tab 切到 `penetration` 会话直接下指令（仅限已授权目标） |
 | 定时任务 | "每天早上 9 点执行这个脚本" |
 
 ## 许可

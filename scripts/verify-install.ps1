@@ -85,7 +85,8 @@ $required = @(
   (Join-Path $skillRoot 'cluster/SKILL.md'),
   (Join-Path $skillRoot 'advisor/SKILL.md'),
   (Join-Path $skillRoot 'computer-use/SKILL.md'),
-  (Join-Path $skillRoot 'penetration-testing/SKILL.md')
+  (Join-Path $skillRoot 'penetration-testing/SKILL.md'),
+  (Join-Path $skillRoot 'penetration-testing/mcp-wsl-tools.mjs')
 )
 foreach ($f in $required) { Check (Test-Path $f) "文件存在: $([IO.Path]::GetFileName($f))" }
 
@@ -130,6 +131,19 @@ if ($RepoPath) {
   } else {
     Write-Host "  [WARN] $repo 不是 git 仓库，跳过 hash 对比" -ForegroundColor Yellow
   }
+}
+
+# ---------- 6.5 MCP 注册状态（非阻断提示） ----------
+foreach ($mcpName in @('project-docs', 'wsl-pentest')) {
+  $found = $false
+  foreach ($cfg in @(
+      "$env:USERPROFILE\.config\opencode\opencode.json",
+      "$env:USERPROFILE\.config\opencode\opencode.jsonc"
+    )) {
+    if ((Test-Path $cfg) -and ((Get-Content $cfg -Raw) -match "`"$mcpName`"")) { $found = $true; break }
+  }
+  if ($found) { Write-Host "  [PASS] opencode 配置已注册 $mcpName MCP" -ForegroundColor Green }
+  else { Write-Host "  [WARN] 未在 ~/.config/opencode/opencode.json(c) 检测到 $mcpName MCP — 工具包核心能力依赖，请按 INSTALL.md 注册" -ForegroundColor Yellow }
 }
 
 # ---------- 7. Full：真实加载插件 ----------
