@@ -30,6 +30,16 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 
 - subagent 模型按本机可用性动态注入（无 key 自动降级回退），详见 `./cluster/SKILL.md`
 
+## Goal 模式
+
+Tab 切换到 `goal` agent：设定目标与**可验证验收标准**后多轮迭代推进，直到全部达标或达到轮次上限（默认 10，0=无限需二次确认）。专为无人值守设计：开工前按 **7 项模板问卷**澄清（目标/背景/验收标准附验证命令/范围红线/策略上限/**异常预案**/回滚约定），auto 模式开跑前必须 Pre-Flight 一次性确认。每轮以 `goal-check(advance:true)` 开始，轮末证据写回 `.memory/goals/active.md` 并提交 `checkpoint(goal)` 提交可回滚；防倒退契约（遗留标准优先、3 轮无进展熔断）。confirm 每轮 question 请示，auto 连跑且 idle 自驱续跑；哨兵 `GOAL_ACHIEVED`/`GOAL_STOP` 供 `scripts/goal-loop.ps1` 外部硬循环判停；活动 Goal 跨会话自动检测续跑。
+
+| 工具 | 触发时机 |
+|------|---------|
+| `goal-set` | 创建目标 / extend 追加轮次 |
+| `goal-check` | 每轮开始(advance)或查看进度 |
+| `goal-close` | 达标(achieved)/叫停(abandoned)归档 |
+
 ## 工作流
 
 ```
@@ -82,6 +92,7 @@ HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → MCP定�
 | 工具 | 触发时机 |
 |------|---------|
 | `tool-search` | 不知道用哪个工具完成任务时 / 用户说"找工具、用哪个" |
+| `goal-set/goal-check/goal-close` | Goal 模式迭代（用户说"设个目标/迭代到达成为止"） |
 | `cron-create` | 用户说"定时提醒/每天执行/计划任务"（Windows schtasks） |
 
 ## 文档强制规则

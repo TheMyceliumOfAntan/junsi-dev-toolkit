@@ -30,6 +30,7 @@ const expected = [
   'store-decision', 'save-progress', 'prepare-handoff', 'restore-handoff',
   'list-decisions', 'memory-doctor', 'save-preference',
   'cluster-task-prompt', 'cluster-scan-models', 'cluster-allocation',
+  'goal-set', 'goal-check', 'goal-close',
   'tool-search', 'cron-create',
 ];
 

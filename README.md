@@ -1,11 +1,12 @@
 # Junsi Dev Toolkit
 
-> 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群、决策顾问、浏览器自动化、渗透测试。
+> 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群、决策顾问、浏览器自动化、渗透测试、目标迭代。
 
-> ⚠️ **本工具包是 OpenCode 插件**，依赖 `@opencode-ai/plugin` 的消息注入与工具注册机制。其他 Agent（Claude Code / Cursor / Codex 等）只能手动复制 `.agents/skills/` 下的子技能文本使用，路由注入 / Memory 工具 / Cluster / Penetration 模式等宿主能力**未经测试，不保证可用**。
+> ⚠️ **本工具包是 OpenCode 插件**，依赖 `@opencode-ai/plugin` 的消息注入与工具注册机制。其他 Agent（Claude Code / Cursor / Codex 等）只能手动复制 `.agents/skills/` 下的子技能文本使用，路由注入 / Memory 工具 / Cluster / Penetration / Goal 模式等宿主能力**未经测试，不保证可用**。
 
-## v3.3 核心能力
+## v3.4 核心能力
 
+- **Goal 目标迭代模式**：Tab 切换 `goal` agent——设定目标与可验证验收标准后多轮迭代推进，直到全部达标或达到轮次上限。`goal-set`/`goal-check`/`goal-close` 三工具把目标、标准勾选、轮次计数持久化到 `.memory/goals/`（confirm 每轮确认 / auto 连跑；默认 10 轮，0=无限需二次确认）；活动 Goal 跨会话自动检测续跑；达标输出 `GOAL_ACHIEVED` 哨兵供 `scripts/goal-loop.ps1` 外部硬循环判停。
 - **Penetration 渗透测试模式**：Tab 切换 `penetration` 专属会话，按 OWASP WSTG 8 阶段流程用 WSL 渗透工具执行测试；除 `docs/penetration-reports/` 报告外不写任何文件。配套 `wsl-pentest` MCP 服务器（零依赖 Node 脚本）封装 `wsl-run` / `wsl-tool-check` / `wsl-install` / `wsl-nmap` / `wsl-sqlmap` / `wsl-nikto` 六个工具（**必装**），未配置 MCP 自动回退 bash 执行 `wsl -e ...`。仅限已获授权目标。
 
 - **证据优先的 Bug 修复（diagnose-before-fix）**：融合对抗性审查流程 — 证据三档标签（已证明/已读证/潜在）、先立基线区分新旧问题、warning 免费 bug 索引、一次性探针、回归必须验证"没修复时会失败"、实测细则与反模式清单。
@@ -35,6 +36,7 @@
 | **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
 | **advisor** | 决策顾问（权衡矩阵 + 推荐 + 确认） | 顾问、权衡、方案对比、选哪个 |
 | **computer-use** | 浏览器自动化（playwright MCP 操作闭环） | computer_use、操作电脑、浏览器自动化 |
+| **goal** | 目标迭代模式（设目标+验收标准，多轮推进直到达标/达上限） | Tab 切换 goal 会话、goal-set/goal-check/goal-close |
 | **penetration-testing** | Web 安全渗透测试模式（OWASP WSTG 8 阶段，WSL 工具，先确认授权与黑/灰/白盒） | Tab 切换 `penetration` 会话（不走关键词路由） |
 | **wsl-pentest**（MCP） | WSL 渗透工具封装：wsl-run/tool-check/install/nmap/sqlmap/nikto（零依赖 Node 脚本，必装，见 INSTALL.md） | 由 AI 在渗透流程中直接调用 |
 | **tool-search** | 工具索引检索（找最合适工具） | 找工具、用哪个工具 |
@@ -60,6 +62,18 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 - **工具**：`wsl-pentest` MCP（**必装**，注册方法见 [INSTALL.md](INSTALL.md)）：`wsl-run` / `wsl-tool-check` / `wsl-install` / `wsl-nmap` / `wsl-sqlmap` / `wsl-nikto`；执行后端自动适配——Windows 经 WSL、Linux 等自带 bash 的系统直接本机 bash（功能一致）；未配置 MCP 时 Windows 回退 `wsl -e bash -c "<命令>"`、Linux 直接跑；本机无 WSL 时工具返回 `WSL_NOT_AVAILABLE`，AI 会警告并询问是否继续，同意后回退 pwsh 同类工具（`Test-NetConnection`/`Invoke-WebRequest` 等，sqlmap/nikto/hydra 无等价项标注"需 WSL"跳过）
 - **流程**：先 `question` 确认黑/灰/白盒与范围 → 环境检查/安装 → 分阶段执行 → （可选）攻击验证 → 报告落盘 + 回复摘要；报告每个漏洞必须含**建议解决方案**（具体可执行的配置修改/代码修复方向/依赖升级）
 - **授权硬门槛**：仅对已获书面授权的目标测试。渗透测试不走关键词路由，统一在 Penetration 会话执行
+
+## Goal 模式
+
+Tab 切换到 `goal` agent：说清目标 → 按模板问卷澄清 → `goal-set` 建档 → 多轮迭代推进直到达标或达上限。专为**无人值守**设计，杜绝"跑一晚上发现跑偏"。
+
+- **开工模板问卷（7 项，缺项引导补全）**：目标 / 背景现状 / 可验证验收标准（每条附验证命令）/ 范围红线 / 迭代策略与轮次上限 / 异常预案（如"构建连续失败 3 次→STOP"）/ 回滚约定
+- **Pre-Flight（auto 模式唯一确认点）**：无人值守运行中不再提问——开跑前用 question 让用户一次性过完整个模板；运行中一切按模板与异常预案行动
+- **工具**：`goal-set`（建档/extend 追加轮次；maxIterations 默认 10，0=无限需二次确认）、`goal-check`（每轮 advance 自增 + 状态卡含红线提醒）、`goal-close`（achieved/abandoned 归档）
+- **防倒退契约**：遗留标准每轮优先重审，同一标准连续 3 轮无新证据即熔断问询
+- **每轮 checkpoint**：轮末自动 `git commit -m "checkpoint(goal): 第N轮 <摘要>"`（严禁 push），跑偏按提交回滚，不白烧 token
+- **持久化**：状态存 `.memory/goals/active.md`，新会话自动检测续跑
+- **自驱续跑**：auto 模式下插件在 session.idle 自动注入续跑指令（失败自动降级）；或用外部硬循环 `pwsh scripts/goal-loop.ps1 -MaxLoops 20` 反复驱动 `opencode run --agent goal`，哨兵 `GOAL_ACHIEVED`/`GOAL_STOP` 判停
 
 ## 安装（OpenCode）
 
@@ -89,7 +103,7 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 2. 检查 plugin 数组中是否已包含 "junsi-dev-toolkit"；未包含则在末尾追加 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"（本地克隆存在时用绝对路径代替）
 3.【必装】检查 mcp 中是否已注册 "project-docs" 与 "wsl-pentest"（type=local，enabled=true，command 见 INSTALL.md：project-docs 用 python 跑 mcp-server.py，wsl-pentest 用 node 跑 penetration-testing/mcp-wsl-tools.mjs）；任一缺失则按 INSTALL.md 补齐。project-docs 是文档/代码感知中枢，wsl-pentest 是 Penetration 渗透模式依赖，均不允许跳过（另需确认前置：`pip install mcp pydantic`；Windows+WSL）
 4. 运行 `pwsh scripts/verify-install.ps1 -RepoPath <本仓库路径>` 检验安装副本（任一项 FAIL 说明旧版或损坏）。**升级一律整体重装**：删除旧安装副本（opencode 缓存 packages 目录或 node_modules 下的 junsi-dev-toolkit）后重新完整安装，禁止只改个别文件充当升级；git pull 后同样走删旧重装流程。重跑验证直到全部 PASS
-5. 验证通过后输出摘要（工具数 12、子技能数、仓库 hash 是否一致、wsl-pentest MCP 是否已注册），并提醒用户"重启 OpenCode 后生效"
+5. 验证通过后输出摘要（工具数 15、子技能数、仓库 hash 是否一致、project-docs/wsl-pentest MCP 是否已注册），并提醒用户"重启 OpenCode 后生效"
 约束：只改动 OpenCode 配置与本工具包安装副本，不得改动其他项目配置；配置存在冲突或不确定时先询问用户。
 ````
 
@@ -123,7 +137,7 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 ## 验证安装 / 升级
 
 ```powershell
-# 快速检验：自动定位安装副本，检查文件完整性/语法/版本标记/12 工具注册
+# 快速检验：自动定位安装副本，检查文件完整性/语法/版本标记/15 工具注册
 pwsh scripts/verify-install.ps1
 
 # 与源码仓库对比（hash 一致性，确认已升级到最新）
@@ -161,8 +175,10 @@ pwsh scripts/verify-install.ps1 -Full
 | 决策权衡 | "这两个方案怎么选" / "权衡一下利弊" |
 | 浏览器操作 | "帮我打开网页点一下这个按钮" |
 | 渗透测试 | Tab 切到 `penetration` 会话直接下指令（仅限已授权目标） |
+| 目标迭代 | Tab 切到 `goal` 会话说"目标：让所有测试通过，最多迭代 10 轮" |
 | 定时任务 | "每天早上 9 点执行这个脚本" |
 
 ## 许可
 
 MIT
+
