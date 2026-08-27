@@ -38,7 +38,8 @@ Tab 切换到 `goal` agent：按 **GOAL_LIST.MD 标准格式**建立目标清单
 - **todo 进度可视化**：每轮用 `todowrite` 维护进度清单（当前子目标 in_progress 并拆步骤、其余 pending、已完成 completed），每完成一步即更新，让用户实时看到跑到哪一步。
 - **给完 goal 必须先问节奏**：用 question 确认"要不要循环、怎么循环"——auto 自动连跑（无人值守，空闲自驱续跑）/ confirm 每轮确认 / 手动驱动（配合 `scripts/goal-loop.ps1`）；用户不明确时推荐 auto，但必须经确认。中途可用 `goal-set(mode:"auto"/"confirm")` 随时切换节奏。
 - **分步注入防污染**：`goal-check` 只返回精简状态卡（子目标进度表/红线/下一步），完整清单存 `.memory/goals/active.md`，按需读取当前子目标详情，不整篇回显。
-- **每轮 checkpoint**：轮前记录基线（git commit/stash + hash），轮末证据写回 `.memory/goals/active.md` 并提交 `checkpoint(goal): 第N轮 <摘要>` 可回滚；严禁 push。
+- **每轮 checkpoint**：轮前记录基线（git commit/stash + hash），轮末证据写回 `.memory/goals/active.md` 并提交 `git -c commit.gpgsign=false commit -m "checkpoint(goal): 第N轮 <摘要>"` 可回滚（禁用 GPG 签名防弹窗卡死）；严禁 push。
+- **防卡纪律**：禁止启动长驻/不结束的进程（`npm run dev`/`node server`/`docker compose up` 等，bash 不结束就不返回会把整轮卡死）；验证只跑会自然结束的命令，确需服务则后台启动+用完即杀；`scripts/goal-loop.ps1` 已内置单轮超时（默认 15 分钟）兜底。
 - **总体验收**：全部标准勾选后不得直接 close——先逐条重跑全部验证规则（通用 VR + 各子目标专属）核对真实命令输出；不合格 → `git reset --hard` 回滚到最近 checkpoint，失败子目标标记回 `- [ ]`，打回重做。
 - 防倒退契约（遗留标准优先、3 轮无进展熔断）；confirm 每轮 question 请示，auto 连跑且 idle 自驱续跑；哨兵 `GOAL_ACHIEVED`/`GOAL_STOP` 供 `scripts/goal-loop.ps1` 外部硬循环判停；活动 Goal 跨会话自动检测续跑。
 

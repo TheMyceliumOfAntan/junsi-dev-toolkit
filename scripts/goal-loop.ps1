@@ -17,6 +17,9 @@ agent 回复中出现哨兵标记时自动停止。
 .PARAMETER Prompt
 每轮发给 agent 的推进指令。
 
+.PARAMETER TimeoutSeconds
+单轮执行超时（秒），超时判定进程卡死并终止循环，默认 900（15 分钟）。
+
 .EXAMPLE
 pwsh scripts/goal-loop.ps1 -MaxLoops 20
 #>
@@ -24,21 +27,48 @@ param(
   [int]$MaxLoops = 20,
   [string]$Agent = 'goal',
   [string]$Prompt = '继续迭代：先调用 goal-check(advance:true)，严格按状态卡指令完成本轮。',
-  [int]$IntervalSeconds = 2
+  [int]$IntervalSeconds = 2,
+  [int]$TimeoutSeconds = 900
 )
 
 $ErrorActionPreference = 'Continue'
-Write-Host "== Goal 外部硬循环启动：agent=$Agent, maxLoops=$MaxLoops ==" -ForegroundColor Cyan
+Write-Host "== Goal 外部硬循环启动：agent=$Agent, maxLoops=$MaxLoops, timeout=${TimeoutSeconds}s ==" -ForegroundColor Cyan
+
+function Invoke-Round {
+  param([string]$AgentName, [string]$PromptText, [int]$TimeoutSec)
+  $job = Start-Job -ScriptBlock {
+    param($a, $p)
+    & opencode run --agent $a $p 2>&1
+    exit $LASTEXITCODE
+  } -ArgumentList $AgentName, $PromptText
+  if (-not (Wait-Job $job -Timeout $TimeoutSec)) {
+    Stop-Job $job -Force | Out-Null
+    Remove-Job $job -Force
+    return @{ Out = ''; Code = -999 }
+  }
+  $out = (Receive-Job $job | Out-String)
+  $code = if ($job.State -eq 'Completed') { $job.ChildJobs[0].ExitCode } else { 1 }
+  Remove-Job $job -Force
+  return @{ Out = $out; Code = $code }
+}
 
 for ($i = 1; $i -le $MaxLoops; $i++) {
   Write-Host "`n== [loop $i/$MaxLoops] opencode run --agent $Agent ==" -ForegroundColor Cyan
-  $out = & opencode run --agent $Agent $Prompt 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "opencode run 退出码 $LASTEXITCODE，重试一次后仍失败则终止" -ForegroundColor Yellow
-    $out = & opencode run --agent $Agent $Prompt 2>&1
-    if ($LASTEXITCODE -ne 0) { Write-Host '== 连续失败，终止循环 ==' -ForegroundColor Red; exit 1 }
+  $r = Invoke-Round -AgentName $Agent -PromptText $Prompt -TimeoutSec $TimeoutSeconds
+  if ($r.Code -eq -999) {
+    Write-Host "== 本轮执行超时（${TimeoutSeconds}s），判定进程卡死，终止循环（请检查是否误启动长驻服务/命令） ==" -ForegroundColor Red
+    exit 2
   }
-  $text = ($out | Out-String)
+  if ($r.Code -ne 0) {
+    Write-Host "opencode run 退出码 $($r.Code)，重试一次后仍失败则终止" -ForegroundColor Yellow
+    $r = Invoke-Round -AgentName $Agent -PromptText $Prompt -TimeoutSec $TimeoutSeconds
+    if ($r.Code -eq -999) {
+      Write-Host '== 重试超时，终止循环 ==' -ForegroundColor Red
+      exit 2
+    }
+    if ($r.Code -ne 0) { Write-Host '== 连续失败，终止循环 ==' -ForegroundColor Red; exit 1 }
+  }
+  $text = $r.Out
   ($text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 5) | ForEach-Object { Write-Host "  $_" }
 
   if ($text -match 'GOAL_ACHIEVED') {

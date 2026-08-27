@@ -943,10 +943,14 @@ const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户�
 1. 轮首 \`goal-check(advance: true)\` 获取精简状态卡，严格遵守
 2. **todo 进度可视化（每轮必做）**：用 \`todowrite\` 维护进度清单，让用户在界面实时看到跑到哪一步——当前子目标置 \`in_progress\` 并按执行步骤拆成 item；其余子目标一行一个 \`pending\`；已完成的置 \`completed\`。每完成一步立即更新对应 item 状态，子目标全部完成时勾选其成功标准并同步 todo。
 3. **分步注入（防上下文污染）**：完整清单在 \`.memory/goals/active.md\`，不整篇回显；按需读当前子目标详情，其余一行代替
-4. 防倒退契约：遗留未勾选标准优先；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案或 GOAL_STOP）
-5. **每轮 checkpoint（前后各一次）**：轮前基线（git commit/stash + hash 写日志）；轮末证据写回 active.md（\`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ \`git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"\`（无变更跳过；严禁 push）
-6. 判定达标以真实命令输出为据（粘贴关键输出），禁止口头宣称
-7. 最小改动；不碰范围红线
+4. **防卡命令纪律（无人值守不卡死）**：
+   - **禁止启动长驻/不结束的进程**（如 \`npm run dev\`、\`node server.js\`、\`docker compose up\`、\`cargo run\` 等）——bash 命令不结束就不返回，会把整轮卡死
+   - 验证只跑**会自然结束**的命令（build/test/lint/typecheck/curl 单请求等）；确实需要服务时：后台启动（\`Start-Process ... -PassThru\`）+ 验证完立即 \`Stop-Process\`，或对单条命令设置合理 timeout
+   - **git 提交一律禁用 GPG 签名**（签名会弹窗/等密码，无人值守卡死）：\`git -c commit.gpgsign=false commit ...\`；确实要签名的等人工参与时再处理
+5. 防倒退契约：遗留未勾选标准优先；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案或 GOAL_STOP）
+6. **每轮 checkpoint（前后各一次）**：轮前基线（git commit/stash + hash 写日志）；轮末证据写回 active.md（\`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ \`git add -A && git -c commit.gpgsign=false commit -m "checkpoint(goal): 第N轮 <摘要>"\`（无变更跳过；严禁 push）
+7. 判定达标以真实命令输出为据（粘贴关键输出），禁止口头宣称
+8. 最小改动；不碰范围红线
 
 ## auto 自动续跑机制
 - auto 模式完成一轮后会话空闲，插件 \`session.idle\` 自驱续跑下一轮；若发现未自动续跑，提示用户改用 \`pwsh scripts/goal-loop.ps1\` 外部硬循环兜底，不要干等。
@@ -1696,7 +1700,7 @@ const registerGoalTools = async (tools) => {
       }
 
       lines.push('防倒退契约：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下 question 用户（auto 模式按异常预案处理或输出 GOAL_STOP）。');
-      lines.push('每轮 checkpoint：轮前记录基线（git commit/stash，hash 写入日志），轮末提交 checkpoint(goal): 第N轮 <摘要>；判定达标必须以真实命令输出为据。');
+      lines.push('每轮 checkpoint：轮前记录基线（git commit/stash，hash 写入日志），轮末提交 git -c commit.gpgsign=false commit -m "checkpoint(goal): 第N轮 <摘要>"（禁用 GPG 签名防弹窗卡死）；禁止启动长驻进程；判定达标必须以真实命令输出为据。');
       lines.push('');
 
       if (!open && done > 0) {
