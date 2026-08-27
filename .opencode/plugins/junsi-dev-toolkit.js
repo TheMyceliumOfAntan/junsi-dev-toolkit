@@ -920,7 +920,9 @@ const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户�
 
 ## 开工前（两步必做，杜绝跑偏）
 **第一步：确认清单来源，二选一**
-- A. 用户提供目标清单文件（如桌面 \`GOAL_LIST.MD\`、项目内 \`docs/goal.md\` 等）→ 用 Read 读取文件，用 \`goal-set(fromFile: "<路径>")\` 直接导入建档；**不要再逐项问卷**，仅对缺失区块补一次确认。
+- A. 用户提供目标清单文件（如桌面 \`GOAL_LIST.MD\`、项目内 \`docs/goal.md\` 等）→ 用 Read 读取文件，用 \`goal-set(fromFile: "<路径>")\` 直接导入建档；**不要再逐项问卷**。
+  - **文件不标准 → 自动补全，缺项询问用户**：若 goal-set 返回「补全提示」或「清单文件诊断」，逐项处理——能自动推断的（如 mission 缺失可从目标标题推断、优先级缺失标 P2）自动补齐；无法推断的（如某子目标缺成功标准、轮次上限、异常预案）**用 question 逐一询问用户补齐**；用户补不齐的按已解析的最小可用清单建档，并在迭代日志标注缺失项。
+  - 文件完全无法解析（无任何子目标）→ 提示用户文件需符合 GOAL_LIST.MD 标准格式（\`### FIX-XX/ENH-XX\` 区块 + 成功标准），或放弃文件改用问卷方式（B）。
 - B. 无文件 → 先读代码了解现状，再按 7 区块模板逐项澄清：
   1.【核心使命】一句话总目标
   2.【全局约束】带 ID 约束表（GC-01…）
@@ -939,11 +941,12 @@ const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户�
 
 ## 每轮纪律（顺序执行，缺一违规）
 1. 轮首 \`goal-check(advance: true)\` 获取精简状态卡，严格遵守
-2. **分步注入（防上下文污染）**：完整清单在 \`.memory/goals/active.md\`，不整篇回显；按需读当前子目标详情，其余一行代替
-3. 防倒退契约：遗留未勾选标准优先；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案或 GOAL_STOP）
-4. **每轮 checkpoint（前后各一次）**：轮前基线（git commit/stash + hash 写日志）；轮末证据写回 active.md（\`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ \`git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"\`（无变更跳过；严禁 push）
-5. 判定达标以真实命令输出为据（粘贴关键输出），禁止口头宣称
-6. 最小改动；不碰范围红线
+2. **todo 进度可视化（每轮必做）**：用 \`todowrite\` 维护进度清单，让用户在界面实时看到跑到哪一步——当前子目标置 \`in_progress\` 并按执行步骤拆成 item；其余子目标一行一个 \`pending\`；已完成的置 \`completed\`。每完成一步立即更新对应 item 状态，子目标全部完成时勾选其成功标准并同步 todo。
+3. **分步注入（防上下文污染）**：完整清单在 \`.memory/goals/active.md\`，不整篇回显；按需读当前子目标详情，其余一行代替
+4. 防倒退契约：遗留未勾选标准优先；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案或 GOAL_STOP）
+5. **每轮 checkpoint（前后各一次）**：轮前基线（git commit/stash + hash 写日志）；轮末证据写回 active.md（\`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ \`git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"\`（无变更跳过；严禁 push）
+6. 判定达标以真实命令输出为据（粘贴关键输出），禁止口头宣称
+7. 最小改动；不碰范围红线
 
 ## auto 自动续跑机制
 - auto 模式完成一轮后会话空闲，插件 \`session.idle\` 自驱续跑下一轮；若发现未自动续跑，提示用户改用 \`pwsh scripts/goal-loop.ps1\` 外部硬循环兜底，不要干等。
@@ -1455,9 +1458,9 @@ const buildGoalDoc = (args, mode, max) => {
   return head.concat(body).join('\n');
 };
 
-/* 解析外部 GOAL_LIST.MD 清单文件（兼容 markdown 表格与列表两种区块格式） */
+/* 解析外部 GOAL_LIST.MD 清单文件（兼容 markdown 表格与列表两种区块格式）；返回 issues 完整性诊断 */
 const parseGoalListFile = (text) => {
-  const out = { globalConstraints: [], goals: [] };
+  const out = { globalConstraints: [], goals: [], issues: [] };
   const grab = (re) => {
     const m = text.match(re);
     return m ? m[1].trim() : '';
@@ -1504,7 +1507,7 @@ const parseGoalListFile = (text) => {
         steps: field('执行步骤'),
         fallback: field('降级策略'),
         constraint: field('约束条件'),
-        priority: field('优先级'),
+        priority: field('优先级') || 'P2',
       };
     })
     .filter((g) => g.title || g.description || g.success);
@@ -1512,6 +1515,16 @@ const parseGoalListFile = (text) => {
   out.execution = grab(/^## 5\. (?:Agent )?执行策略[^\n]*\n([\s\S]*?)(?=\n## 6\. )/m);
   out.verification = grab(/^## 6\. 验证规则[^\n]*\n([\s\S]*?)(?=\n## 7\. )/m);
   out.termination = grab(/^## 7\. 终止条件[^\n]*\n([\s\S]*?)(?=\n## 8\. )/m);
+
+  if (!out.mission) out.issues.push('缺少【核心使命】（## 1. 核心使命）');
+  if (!out.globalConstraints.length) out.issues.push('缺少【全局约束】（GC-01…）');
+  if (!out.goals.length) out.issues.push('未解析到任何子目标（需要 ### FIX-XX / ENH-XX 区块）——文件可能不符合 GOAL_LIST.MD 标准格式');
+  out.goals.forEach((g) => {
+    if (!g.success) out.issues.push(`子目标 ${g.id} 缺少成功标准（勾选验收依据）`);
+  });
+  if (!out.execution) out.issues.push('缺少【执行策略】（优先级/并行规则）');
+  if (!out.verification) out.issues.push('缺少【验证规则】');
+  if (!out.termination) out.issues.push('缺少【终止条件】');
   return out;
 };
 
@@ -1612,7 +1625,7 @@ const registerGoalTools = async (tools) => {
         hasGoals = false;
       }
       if (!hasGoals && !criteria.length) {
-        return 'criteria 不能为空：至少提供一条可验证的完成标准（命令输出/测试通过等），或传 goals 子目标清单（JSON 数组），或 fromFile 指向清单文件。';
+        return `未解析到任何子目标${args.fromFile ? '（文件可能不符合 GOAL_LIST.MD 标准格式，需含 ### FIX-XX/ENH-XX 区块与成功标准）' : ''}。criteria 不能为空：至少提供一条可验证的完成标准，或传 goals 子目标清单（JSON 数组），或 fromFile 指向清单文件。${imported && imported.issues.length ? `\n清单文件诊断：\n${imported.issues.map((i) => `  - ${i}`).join('\n')}` : ''}`;
       }
 
       const mode = args.mode === 'auto' ? 'auto' : 'confirm';
@@ -1629,6 +1642,7 @@ const registerGoalTools = async (tools) => {
         ...(splitList(effective.globalConstraints).length ? [`全局约束：${splitList(effective.globalConstraints).length} 条（GC 编号）`] : []),
         `轮次：0/${max === 0 ? '∞' : max}｜节奏：${mode === 'auto' ? 'auto 自动连跑（空闲自驱续跑，达标/达上限/异常才停）' : 'confirm 每轮 question 请示'}`,
         effective.constraints ? '⚠️ 已登记范围红线，触碰即停。' : '',
+        ...(imported && imported.issues.length ? ['⚠️ 清单文件补全提示（缺项需询问用户补齐）：', ...imported.issues.map((i) => `  - ${i}`), ''] : []),
         '',
         mode === 'confirm'
           ? '下一步：用 question 与用户最终确认目标清单与运行节奏，然后每轮以 goal-check(advance:true) 开始；每轮前后各建 git checkpoint。'

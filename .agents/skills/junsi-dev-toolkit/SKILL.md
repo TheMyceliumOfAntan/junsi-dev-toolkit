@@ -34,7 +34,8 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 
 Tab 切换到 `goal` agent：按 **GOAL_LIST.MD 标准格式**建立目标清单（核心使命 / 全局约束 GC-XX / 修复类 FIX-XX + 优化类 ENH-XX 子目标（含目标描述·触发条件·成功标准·执行步骤·降级策略·优先级）/ 执行策略（优先级+并行规则）/ 验证规则 VR-XX / 终止条件 / 状态追踪），多轮迭代推进直到**总体验收通过**或达到轮次上限（默认 10，0=无限需二次确认）。
 
-- **清单来源**：用户提供清单文件（如 `GOAL_LIST.MD`）→ `goal-set(fromFile:"路径")` 直接导入解析建档，不再逐项问卷；无文件才按 7 区块模板澄清。
+- **清单来源**：用户提供清单文件（如 `GOAL_LIST.MD`）→ `goal-set(fromFile:"路径")` 直接导入解析建档，不再逐项问卷；无文件才按 7 区块模板澄清。**文件不标准 → 自动补全**：能推断的（mission/优先级）自动补齐，无法推断的（缺成功标准/轮次上限/异常预案）用 question 询问用户补齐，解析失败则提示按标准格式补全或改用问卷。
+- **todo 进度可视化**：每轮用 `todowrite` 维护进度清单（当前子目标 in_progress 并拆步骤、其余 pending、已完成 completed），每完成一步即更新，让用户实时看到跑到哪一步。
 - **给完 goal 必须先问节奏**：用 question 确认"要不要循环、怎么循环"——auto 自动连跑（无人值守，空闲自驱续跑）/ confirm 每轮确认 / 手动驱动（配合 `scripts/goal-loop.ps1`）；用户不明确时推荐 auto，但必须经确认。中途可用 `goal-set(mode:"auto"/"confirm")` 随时切换节奏。
 - **分步注入防污染**：`goal-check` 只返回精简状态卡（子目标进度表/红线/下一步），完整清单存 `.memory/goals/active.md`，按需读取当前子目标详情，不整篇回显。
 - **每轮 checkpoint**：轮前记录基线（git commit/stash + hash），轮末证据写回 `.memory/goals/active.md` 并提交 `checkpoint(goal): 第N轮 <摘要>` 可回滚；严禁 push。
