@@ -918,36 +918,46 @@ const PENTEST_AGENT_PROMPT = `你是专业的渗透测试工程师（Penetration
 
 const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户给你一个目标，你负责按「目标清单」（GOAL_LIST.MD 标准格式）多轮迭代推进，直到总体验收通过或达到轮次上限。
 
-## 开工前：目标清单问卷（以 GOAL_LIST.MD 标准格式为准，杜绝跑偏）
-先读代码了解现状，再按以下 7 个区块逐项澄清——**缺哪项就引导用户补全，全部明确后才能 goal-set 建档**：
-1.【核心使命】一句话总目标
-2.【全局约束】带 ID 的约束表（GC-01…），每条含影响范围
-3.【目标清单】拆分为**修复类(FIX-XX)**与**优化类(ENH-XX)**子目标；每个子目标含：目标描述 / 触发条件 / 成功标准（可验证，附验证命令）/ 执行步骤 / 降级策略 / 约束条件 / 优先级(P0-P3)
-4.【执行策略】优先级排序、并行规则（允许/依赖/禁止）、暂停与恢复条件
-5.【验证规则】通用验证(VR-XX) + 每个子目标专属验证
-6.【终止条件】成功终止（全部验证通过）/ 提前终止（异常预案）/ 部分完成（输出完成度报告）
-7.【回滚约定】记录基线 commit hash；每轮前后各建 git checkpoint，跑偏按提交回滚
+## 开工前（两步必做，杜绝跑偏）
+**第一步：确认清单来源，二选一**
+- A. 用户提供目标清单文件（如桌面 \`GOAL_LIST.MD\`、项目内 \`docs/goal.md\` 等）→ 用 Read 读取文件，用 \`goal-set(fromFile: "<路径>")\` 直接导入建档；**不要再逐项问卷**，仅对缺失区块补一次确认。
+- B. 无文件 → 先读代码了解现状，再按 7 区块模板逐项澄清：
+  1.【核心使命】一句话总目标
+  2.【全局约束】带 ID 约束表（GC-01…）
+  3.【目标清单】FIX-XX 修复类 + ENH-XX 优化类子目标（目标描述/触发条件/成功标准附验证命令/执行步骤/降级策略/约束条件/优先级 P0-P3）
+  4.【执行策略】优先级/并行规则/暂停恢复
+  5.【验证规则】通用 VR-XX + 各子目标专属
+  6.【终止条件】成功/提前/部分完成
+  7.【回滚约定】基线 commit hash；每轮前后 git checkpoint
 
-- mode=confirm：通过 question 逐项确认后再建档开跑。
-- mode=auto（无人值守）：运行中无法提问，**必须在开跑前用 question 让用户一次性过完整个模板并给出明确回答（Pre-Flight）**——这是 auto 模式唯一一次确认点；之后运行中不再提问，一切按清单与异常预案行动。
+**第二步：用 question 确认运行节奏（给完 goal 后必须问，别默认、别直接开跑）**
+- 向用户明确询问："**要不要自动循环？怎么循环？**"
+- 选项：① auto 自动连跑（无人值守：跑完一轮自动继续，直到达标/达上限/异常才停，空闲由插件自驱续跑）② confirm 每轮确认（每轮轮末 question 请示）③ 手动驱动（每轮由用户发指令推进，可配合 scripts/goal-loop.ps1 外部硬循环）。
+- 用户选 auto → mode=auto；同时用 question 一次性确认 Pre-Flight（轮次上限/异常预案/确认开跑），之后运行中不再提问。
+- 用户选 confirm → mode=confirm；每轮轮末 question 请示。
+- 用户不明确 → 默认推荐 auto（清单完整可自动验证时），但必须经用户确认后再建档，不得自行决定。
 
 ## 每轮纪律（顺序执行，缺一违规）
-1. 轮首调用 \`goal-check(advance: true)\` —— 返回精简状态卡（子目标进度表/红线/下一步），严格遵守
-2. **分步注入（防上下文污染）**：完整目标清单存于 \`.memory/goals/active.md\`，**不要整篇回显**；只按需读取并聚焦**当前子目标**详情，其余子目标用一行（ID+描述）代替
-3. **防倒退契约**：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案处理或 GOAL_STOP）
-4. **每轮 checkpoint（前后各一次）**：轮前记录基线（git commit 或 stash，hash 写入日志）；轮末证据写回 \`.memory/goals/active.md\`（达成标准改 \`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ **git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"**（无变更跳过；严禁 push）
-5. 判定达标必须以真实命令输出为据（粘贴关键输出），禁止口头宣称
-6. 最小改动推进；不碰范围红线
+1. 轮首 \`goal-check(advance: true)\` 获取精简状态卡，严格遵守
+2. **分步注入（防上下文污染）**：完整清单在 \`.memory/goals/active.md\`，不整篇回显；按需读当前子目标详情，其余一行代替
+3. 防倒退契约：遗留未勾选标准优先；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案或 GOAL_STOP）
+4. **每轮 checkpoint（前后各一次）**：轮前基线（git commit/stash + hash 写日志）；轮末证据写回 active.md（\`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ \`git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"\`（无变更跳过；严禁 push）
+5. 判定达标以真实命令输出为据（粘贴关键输出），禁止口头宣称
+6. 最小改动；不碰范围红线
+
+## auto 自动续跑机制
+- auto 模式完成一轮后会话空闲，插件 \`session.idle\` 自驱续跑下一轮；若发现未自动续跑，提示用户改用 \`pwsh scripts/goal-loop.ps1\` 外部硬循环兜底，不要干等。
+- 用户想中途改节奏：\`goal-set(mode: "confirm"/"auto")\` 可随时切换，无需重建。
 
 ## 上限与无限
-- 状态卡提示"已达轮次上限" → 立即停下 question 用户：加轮次（goal-set extend:true, addIterations:N）或放弃（goal-close result:"abandoned"）
+- 已达轮次上限 → 立即停下 question：加轮次（goal-set extend:true, addIterations:N）或放弃（goal-close abandoned）
 - maxIterations=0 无限模式：每满 5 轮强制 question 阶段性汇报
 
-## 结束协议（总体验收 + 不合格回退打回；哨兵供 scripts/goal-loop.ps1 判停）
-- 全部标准勾选后**不得直接 close**，先做【总体验收】：逐条重跑全部验证规则（通用 VR-XX + 各子目标专属），以真实命令输出核对
-- 验收全部通过 → \`goal-close(result:"achieved", summary)\` → save-progress → 回复末尾单独一行输出 \`GOAL_ACHIEVED\`
-- 验收发现不合格 → **不得 close**：\`git reset --hard\` 回滚到最近一个 checkpoint(goal) 提交，将失败子目标标记回未完成（\`- [ ]\`），在迭代日志记录失败原因与重做计划，继续下一轮打回重做
-- 触发异常预案/用户叫停 → \`goal-close(result:"abandoned", summary)\` → 回复末尾单独一行输出 \`GOAL_STOP\` 或 \`GOAL_BLOCKED\`
+## 结束协议（总体验收 + 不合格回退打回；哨兵供 goal-loop.ps1 判停）
+- 全部标准勾选后不得直接 close：先【总体验收】逐条重跑全部验证规则（通用 VR + 各子目标专属）核对真实命令输出
+- 验收全部通过 → \`goal-close(result:"achieved", summary)\` → save-progress → 回复末尾输出 \`GOAL_ACHIEVED\`
+- 验收不合格 → 不得 close：\`git reset --hard\` 回滚最近 checkpoint(goal) 提交，失败子目标标记回 \`- [ ]\`，日志记录原因与重做计划，继续下一轮打回重做
+- 触发异常预案/用户叫停 → \`goal-close(result:"abandoned", summary)\` → 输出 \`GOAL_STOP\` 或 \`GOAL_BLOCKED\`
 - 正常迭代轮次不得输出哨兵标记`;
 
 const buildClusterAgents = (models, skillsDir) => {
@@ -1410,7 +1420,7 @@ const buildGoalDoc = (args, mode, max) => {
     const lines = [`### ${g.id}${g.title ? '：' + g.title : ''}`];
     if (g.description) lines.push(`- 目标描述：${g.description}`);
     if (g.trigger) lines.push(`- 触发条件：${g.trigger}`);
-    const succ = splitList(g.success);
+    const succ = String(g.success || '').split(/[;；]+/).map((s) => s.trim()).filter(Boolean);
     if (succ.length) {
       lines.push('- 成功标准：');
       succ.forEach((s) => lines.push(`  - [ ] ${s}`));
@@ -1443,6 +1453,66 @@ const buildGoalDoc = (args, mode, max) => {
 
   body.push('## 9. 迭代日志', '');
   return head.concat(body).join('\n');
+};
+
+/* 解析外部 GOAL_LIST.MD 清单文件（兼容 markdown 表格与列表两种区块格式） */
+const parseGoalListFile = (text) => {
+  const out = { globalConstraints: [], goals: [] };
+  const grab = (re) => {
+    const m = text.match(re);
+    return m ? m[1].trim() : '';
+  };
+  out.mission =
+    grab(/^## 1\. 核心使命[^\n]*\n\s*>\s*(.+)$/m) ||
+    grab(/^# AI Agent 目标设定文档[^\n]*?[—\-]\s*(.+)$/m) ||
+    grab(/^# GOAL: (.+)$/m);
+
+  const gcRows = [...text.matchAll(/^\|\s*GC-\d+\s*\|\s*(.+?)\s*\|/gm)].map((m) => m[1].trim());
+  if (gcRows.length) {
+    out.globalConstraints = gcRows;
+  } else {
+    out.globalConstraints = [...text.matchAll(/^- GC-\d+[：:]\s*(.+)$/gm)].map((m) => m[1].trim());
+  }
+
+  const lines = text.split('\n');
+  let cur = null;
+  for (const line of lines) {
+    const hm = line.match(/^### (?:Goal )?((?:FIX|ENH|BUG|FEAT)-\d+)[：:]\s*(.*)/);
+    if (hm) {
+      cur = { id: hm[1], type: hm[1].startsWith('FIX') || hm[1].startsWith('BUG') ? 'fix' : 'enhancement', title: hm[2].trim(), body: [] };
+      out.goals.push(cur);
+    } else if (cur) {
+      cur.body.push(line);
+    }
+  }
+  out.goals = out.goals
+    .map((gobj) => {
+      const body = gobj.body.join('\n');
+      const field = (name) => {
+        const tm = body.match(new RegExp(`\\|\\s*\\*\\*${name}\\*\\*\\s*\\|\\s*(.+?)\\s*\\|`));
+        if (tm) return tm[1].trim().replace(/<br\s*\/?\s*>/gi, '; ');
+        const lm = body.match(new RegExp(`^-\\s*${name}[：:]\\s*(.+)$`, 'm'));
+        return lm ? lm[1].trim() : '';
+      };
+      return {
+        id: gobj.id,
+        type: gobj.type,
+        title: gobj.title,
+        description: field('目标描述'),
+        trigger: field('触发条件'),
+        success: field('成功标准'),
+        steps: field('执行步骤'),
+        fallback: field('降级策略'),
+        constraint: field('约束条件'),
+        priority: field('优先级'),
+      };
+    })
+    .filter((g) => g.title || g.description || g.success);
+
+  out.execution = grab(/^## 5\. (?:Agent )?执行策略[^\n]*\n([\s\S]*?)(?=\n## 6\. )/m);
+  out.verification = grab(/^## 6\. 验证规则[^\n]*\n([\s\S]*?)(?=\n## 7\. )/m);
+  out.termination = grab(/^## 7\. 终止条件[^\n]*\n([\s\S]*?)(?=\n## 8\. )/m);
+  return out;
 };
 
 const registerGoalTools = async (tools) => {
@@ -1478,6 +1548,7 @@ const registerGoalTools = async (tools) => {
       confirmUnlimited: schema.boolean().optional().describe('无限模式二次确认：maxIterations=0 时必须显式传 true'),
       extend: schema.boolean().optional().describe('true=不给现有目标新建，而是追加轮次'),
       addIterations: schema.number().optional().describe('extend=true 时追加的轮数，默认 5'),
+      fromFile: schema.string().optional().describe('从外部 GOAL_LIST.MD 清单文件导入并建档（自动解析核心使命/全局约束/FIX+ENH 子目标/执行策略/验证规则/终止条件）；传文件绝对路径或相对项目路径'),
     },
     async execute(args, context) {
       const mem = ensureMemoryDir(context.directory);
@@ -1487,52 +1558,81 @@ const registerGoalTools = async (tools) => {
       const activePath = path.join(dir, 'active.md');
       const existing = readActiveGoal(context.directory);
 
-      if (args.extend) {
-        if (!existing) return '当前无活动目标，无法 extend；请去掉 extend 直接新建。';
-        const r = goalRoundOf(existing);
-        const add = Math.max(args.addIterations || 5, 1);
-        const nMax = r.max === 0 ? 0 : r.max + add;
-        fs.writeFileSync(activePath, existing.replace(/^- 轮次：\d+\/\d+$/m, `- 轮次：${r.done}/${nMax}`), 'utf8');
-        return `已追加轮次：${fmtRound({ done: r.done, max: nMax })}\n调用 goal-check(advance:true) 继续下一轮。`;
-      }
       if (existing) {
+        if (args.mode) {
+          const curMode = (existing.match(/^- 模式：(\w+)$/m) || [])[1];
+          if (curMode && curMode !== args.mode) {
+            fs.writeFileSync(activePath, existing.replace(/^- 模式：\w+$/m, `- 模式：${args.mode}`), 'utf8');
+            return `已切换运行节奏：${curMode} → ${args.mode}。${args.mode === 'auto' ? '此后空闲自动续跑，不再逐轮 question。' : '每轮轮末 question 请示。'}调用 goal-check(advance:true) 继续下一轮。`;
+          }
+        }
+        if (args.extend) {
+          const r = goalRoundOf(existing);
+          const add = Math.max(args.addIterations || 5, 1);
+          const nMax = r.max === 0 ? 0 : r.max + add;
+          fs.writeFileSync(activePath, existing.replace(/^- 轮次：\d+\/\d+$/m, `- 轮次：${r.done}/${nMax}`), 'utf8');
+          return `已追加轮次：${fmtRound({ done: r.done, max: nMax })}\n调用 goal-check(advance:true) 继续下一轮。`;
+        }
         const t = (existing.match(/^# GOAL: (.+)$/m) || [])[1] || '';
-        return `已有活动目标「${t}」（${fmtRound(goalRoundOf(existing))}）。请先 goal-close 归档，或传 extend=true + addIterations 追加轮次。`;
+        return `已有活动目标「${t}」（${fmtRound(goalRoundOf(existing))}）。可传 mode 切换运行节奏（confirm/auto），或 extend=true + addIterations 追加轮次，或先 goal-close 归档再新建。`;
       }
+
+      let imported = null;
+      if (args.fromFile) {
+        const p = path.isAbsolute(args.fromFile) ? args.fromFile : path.resolve(context.directory, args.fromFile);
+        if (!fs.existsSync(p)) return `清单文件不存在: ${args.fromFile}`;
+        try {
+          imported = parseGoalListFile(fs.readFileSync(p, 'utf8'));
+        } catch (e) {
+          return `清单文件解析失败: ${e.message}`;
+        }
+      }
+
+      const effective = {
+        ...args,
+        goal: (args.goal || (imported && imported.mission) || '未命名目标').trim(),
+        mission: args.mission || (imported && imported.mission) || undefined,
+        globalConstraints: args.globalConstraints || (imported && imported.globalConstraints.length ? imported.globalConstraints.join('，') : undefined),
+        goals: args.goals || (imported && imported.goals.length ? JSON.stringify(imported.goals) : undefined),
+        execution: args.execution || (imported && imported.execution) || undefined,
+        verification: args.verification || (imported && imported.verification) || undefined,
+        termination: args.termination || (imported && imported.termination) || undefined,
+      };
 
       const max = args.maxIterations ?? 10;
       if (max === 0 && !args.confirmUnlimited) {
         return 'maxIterations=0 是无限迭代，有持续消耗 token 的风险。确认无误请带 confirmUnlimited=true 重新调用。';
       }
-      const criteria = splitList(args.criteria);
+      const criteria = splitList(effective.criteria);
       let hasGoals = false;
       try {
-        const g = JSON.parse(args.goals || '[]');
+        const g = JSON.parse(effective.goals || '[]');
         hasGoals = Array.isArray(g) && g.length > 0;
       } catch {
         hasGoals = false;
       }
       if (!hasGoals && !criteria.length) {
-        return 'criteria 不能为空：至少提供一条可验证的完成标准（命令输出/测试通过等），或传 goals 子目标清单（JSON 数组）。';
+        return 'criteria 不能为空：至少提供一条可验证的完成标准（命令输出/测试通过等），或传 goals 子目标清单（JSON 数组），或 fromFile 指向清单文件。';
       }
 
       const mode = args.mode === 'auto' ? 'auto' : 'confirm';
-      const content = buildGoalDoc(args, mode, max);
+      const content = buildGoalDoc(effective, mode, max);
       fs.writeFileSync(activePath, content, 'utf8');
-      writeIndex(mem, { task: `[GOAL] ${args.goal}`, stage: '目标已设定' });
+      writeIndex(mem, { task: `[GOAL] ${effective.goal}`, stage: '目标已设定' });
 
-      const nGoals = hasGoals ? JSON.parse(args.goals).length : 1;
+      const nGoals = hasGoals ? JSON.parse(effective.goals).length : 1;
       return [
         `GOAL 已建立（GOAL_LIST.MD 标准格式）：.memory/goals/active.md`,
-        `核心使命：${args.goal.trim()}`,
+        `核心使命：${effective.goal}`,
         `子目标：${nGoals} 个（${hasGoals ? 'FIX/ENH 拆分' : '单目标 FIX-01'}）`,
-        ...(splitList(args.globalConstraints).length ? [`全局约束：${splitList(args.globalConstraints).length} 条（GC 编号）`] : []),
-        `轮次：0/${max === 0 ? '∞' : max}｜节奏：${mode === 'auto' ? 'auto 自动连跑（达标/达上限才停）' : 'confirm 每轮 question 请示'}`,
-        args.constraints ? '⚠️ 已登记范围红线，触碰即停。' : '',
+        ...(args.fromFile ? [`来源：${args.fromFile}`] : []),
+        ...(splitList(effective.globalConstraints).length ? [`全局约束：${splitList(effective.globalConstraints).length} 条（GC 编号）`] : []),
+        `轮次：0/${max === 0 ? '∞' : max}｜节奏：${mode === 'auto' ? 'auto 自动连跑（空闲自驱续跑，达标/达上限/异常才停）' : 'confirm 每轮 question 请示'}`,
+        effective.constraints ? '⚠️ 已登记范围红线，触碰即停。' : '',
         '',
         mode === 'confirm'
-          ? '下一步：用 question 与用户最终确认目标清单，然后每轮以 goal-check(advance:true) 开始；每轮前后各建 git checkpoint。'
-          : '下一步（auto 无人值守）：确认 Pre-Flight 已完成（验证规则可自动执行/红线明确/异常预案齐备），记录基线 commit hash 到日志，然后每轮以 goal-check(advance:true) 开始。',
+          ? '下一步：用 question 与用户最终确认目标清单与运行节奏，然后每轮以 goal-check(advance:true) 开始；每轮前后各建 git checkpoint。'
+          : '下一步（auto 无人值守）：确认 Pre-Flight 已完成（验证规则可自动执行/红线明确/异常预案齐备），记录基线 commit hash 到日志，然后每轮以 goal-check(advance:true) 开始；空闲自动续跑。',
       ].filter(Boolean).join('\n');
     },
   });
@@ -1598,7 +1698,7 @@ const registerGoalTools = async (tools) => {
         lines.push(
           mode === 'auto'
             ? '▶️ 未达标：继续执行本轮工作（auto 连跑，无人值守——遇异常预案情形直接 GOAL_STOP，不猜测不等待）。'
-            : '▶️ 未达标：执行本轮工作，轮末用 question 向用户汇报结果并请示是否继续。'
+            : '▶️ 未达标：执行本轮工作，轮末用 question 向用户汇报结果并请示是否继续（若用户想无人值守自动连跑，调用 goal-set(mode:"auto") 切换节奏，无需重建）。'
         );
       }
       return lines.join('\n');
