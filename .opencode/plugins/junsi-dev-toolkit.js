@@ -23,6 +23,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const INJECT_MARK = '<!-- junsi-dev-toolkit:route -->';
 
+/* 独占模式 agent：自带主 agent 流程（prompt），不套用常规开发路由注入，避免子技能全文劫持模式流程 */
+const EXCLUSIVE_AGENTS = new Set(['goal', 'cluster', 'penetration']);
+
 const ROUTES = [
   {
     id: 'cluster',
@@ -913,33 +916,37 @@ const PENTEST_AGENT_PROMPT = `你是专业的渗透测试工程师（Penetration
 - 大规模扫描可能触发 WAF/IDS，建议低峰时段；控制并发与速率。
 - 每个阶段结束简要汇报发现，再进入下一阶段。`;
 
-const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户给你一个目标，你负责多轮迭代推进，直到达成验收标准或达到轮次上限。
+const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户给你一个目标，你负责按「目标清单」（GOAL_LIST.MD 标准格式）多轮迭代推进，直到总体验收通过或达到轮次上限。
 
-## 开工前：目标模板问卷（必做，杜绝跑偏）
-先读代码了解现状，再按以下 7 项模板逐项澄清——**缺哪项就引导用户补全，全部明确后才能 goal-set 建档**：
-1.【目标】一句话最终状态
-2.【背景/现状】当前代码/环境情况、相关入口文件（自己读代码补全，向用户确认）
-3.【验收标准】可验证清单，每条附验证命令；无法自动验证的标注「人工验收」
-4.【范围红线】允许改动的范围；禁止触碰的路径/系统/依赖——触碰即停，不许猜
-5.【迭代策略】每轮做什么类型的工作；轮次上限（默认 10；0=无限需 confirmUnlimited 二次确认）
-6.【异常预案】无人值守遇到即停的情形，如：构建连续失败 ≥3 次 → STOP；缺凭据/网络权限 → STOP；发现目标与现状冲突不可行 → STOP
-7.【回滚约定】开工记录基线 commit hash 写入日志；每轮结束提交 checkpoint(goal) 提交，跑偏按提交回滚
+## 开工前：目标清单问卷（以 GOAL_LIST.MD 标准格式为准，杜绝跑偏）
+先读代码了解现状，再按以下 7 个区块逐项澄清——**缺哪项就引导用户补全，全部明确后才能 goal-set 建档**：
+1.【核心使命】一句话总目标
+2.【全局约束】带 ID 的约束表（GC-01…），每条含影响范围
+3.【目标清单】拆分为**修复类(FIX-XX)**与**优化类(ENH-XX)**子目标；每个子目标含：目标描述 / 触发条件 / 成功标准（可验证，附验证命令）/ 执行步骤 / 降级策略 / 约束条件 / 优先级(P0-P3)
+4.【执行策略】优先级排序、并行规则（允许/依赖/禁止）、暂停与恢复条件
+5.【验证规则】通用验证(VR-XX) + 每个子目标专属验证
+6.【终止条件】成功终止（全部验证通过）/ 提前终止（异常预案）/ 部分完成（输出完成度报告）
+7.【回滚约定】记录基线 commit hash；每轮前后各建 git checkpoint，跑偏按提交回滚
 
 - mode=confirm：通过 question 逐项确认后再建档开跑。
-- mode=auto（无人值守）：运行中无法提问，**必须在开跑前用 question 让用户一次性过完整个模板并给出明确回答（Pre-Flight）**——这是 auto 模式唯一一次确认点；之后运行中不再提问，一切按模板与异常预案行动。
+- mode=auto（无人值守）：运行中无法提问，**必须在开跑前用 question 让用户一次性过完整个模板并给出明确回答（Pre-Flight）**——这是 auto 模式唯一一次确认点；之后运行中不再提问，一切按清单与异常预案行动。
 
 ## 每轮纪律（顺序执行，缺一违规）
-1. 轮首调用 \`goal-check(advance: true)\` —— 返回状态卡与当轮指令，严格遵守
-2. **防倒退契约**：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案处理或 GOAL_STOP）
-3. 最小改动推进；不碰范围红线
-4. 轮末三件事：①证据写回 \`.memory/goals/active.md\`（达成标准改 \`- [x] 标准 ✅第N轮:<证据>\`，日志记一行）；②**git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"**（无变更跳过；严禁 push）；③判定达标必须以真实命令输出为据（粘贴关键输出），禁止口头宣称
+1. 轮首调用 \`goal-check(advance: true)\` —— 返回精简状态卡（子目标进度表/红线/下一步），严格遵守
+2. **分步注入（防上下文污染）**：完整目标清单存于 \`.memory/goals/active.md\`，**不要整篇回显**；只按需读取并聚焦**当前子目标**详情，其余子目标用一行（ID+描述）代替
+3. **防倒退契约**：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案处理或 GOAL_STOP）
+4. **每轮 checkpoint（前后各一次）**：轮前记录基线（git commit 或 stash，hash 写入日志）；轮末证据写回 \`.memory/goals/active.md\`（达成标准改 \`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ **git add -A && git commit -m "checkpoint(goal): 第N轮 <摘要>"**（无变更跳过；严禁 push）
+5. 判定达标必须以真实命令输出为据（粘贴关键输出），禁止口头宣称
+6. 最小改动推进；不碰范围红线
 
 ## 上限与无限
 - 状态卡提示"已达轮次上限" → 立即停下 question 用户：加轮次（goal-set extend:true, addIterations:N）或放弃（goal-close result:"abandoned"）
 - maxIterations=0 无限模式：每满 5 轮强制 question 阶段性汇报
 
-## 结束协议（哨兵供外部循环脚本 scripts/goal-loop.ps1 判停）
-- 全部标准达成 → \`goal-close(result:"achieved", summary)\` → save-progress → 回复末尾单独一行输出 \`GOAL_ACHIEVED\`
+## 结束协议（总体验收 + 不合格回退打回；哨兵供 scripts/goal-loop.ps1 判停）
+- 全部标准勾选后**不得直接 close**，先做【总体验收】：逐条重跑全部验证规则（通用 VR-XX + 各子目标专属），以真实命令输出核对
+- 验收全部通过 → \`goal-close(result:"achieved", summary)\` → save-progress → 回复末尾单独一行输出 \`GOAL_ACHIEVED\`
+- 验收发现不合格 → **不得 close**：\`git reset --hard\` 回滚到最近一个 checkpoint(goal) 提交，将失败子目标标记回未完成（\`- [ ]\`），在迭代日志记录失败原因与重做计划，继续下一轮打回重做
 - 触发异常预案/用户叫停 → \`goal-close(result:"abandoned", summary)\` → 回复末尾单独一行输出 \`GOAL_STOP\` 或 \`GOAL_BLOCKED\`
 - 正常迭代轮次不得输出哨兵标记`;
 
@@ -1328,6 +1335,116 @@ const goalRoundOf = (content) => {
 };
 const fmtRound = (r) => (r.max === 0 ? `${r.done}/∞` : `${r.done}/${r.max}`);
 
+const splitList = (raw) => String(raw || '').split(/[\n,，、;；]+/).map((s) => s.trim()).filter(Boolean);
+
+const countChecks = (content) => {
+  const open = (content.match(/^\s*- \[ \] /gm) || []).length;
+  const done = (content.match(/^\s*- \[x\] /gim) || []).length;
+  return { open, done };
+};
+
+/* 解析 GOAL_LIST 风格 active.md 中的子目标块（### FIX-01/ENH-01 …），返回每块的勾选进度 */
+const parseGoalBlocks = (content) => {
+  const blocks = [];
+  const lines = content.split('\n');
+  let cur = null;
+  for (const line of lines) {
+    if (/^### (FIX|ENH|BUG|FEAT)-\d+[：:]/.test(line)) {
+      cur = { title: line.replace(/^### /, '').trim(), body: [] };
+      blocks.push(cur);
+    } else if (cur) {
+      cur.body.push(line);
+    }
+  }
+  return blocks.map((b) => {
+    const body = b.body.join('\n');
+    return {
+      title: b.title,
+      open: (body.match(/^\s*- \[ \] /gm) || []).length,
+      done: (body.match(/^\s*- \[x\] /gim) || []).length,
+      priority: (body.match(/优先级[：:]\s*([P0-9]+)/) || [])[1],
+    };
+  });
+};
+
+/* 按 GOAL_LIST.MD 标准格式生成 active.md；无 goals 时回退单目标（criteria → FIX-01） */
+const buildGoalDoc = (args, mode, max) => {
+  const head = [
+    `# GOAL: ${args.goal.trim()}`,
+    `- 模式：${mode}`,
+    `- 轮次：0/${max}`,
+    `- 创建：${new Date().toISOString()}`,
+  ];
+  const body = [];
+  body.push('', '## 1. 核心使命 (Core Mission)', `> ${(args.mission || '').trim() || args.goal.trim()}`, '');
+
+  const gcs = splitList(args.globalConstraints);
+  if (gcs.length) {
+    body.push('## 2. 全局约束 (Global Constraints)');
+    gcs.forEach((g, i) => body.push(`- GC-${String(i + 1).padStart(2, '0')}: ${g}`));
+    body.push('');
+  }
+
+  let goals = [];
+  try {
+    goals = JSON.parse(args.goals || '[]');
+    if (!Array.isArray(goals)) goals = [];
+  } catch {
+    goals = [];
+  }
+  if (!goals.length) {
+    const criteria = splitList(args.criteria);
+    goals = [
+      {
+        id: 'FIX-01',
+        type: 'fix',
+        title: args.goal.trim(),
+        description: args.background,
+        success: criteria.join(';'),
+        priority: 'P0',
+      },
+    ];
+  }
+
+  const renderGoal = (g) => {
+    const lines = [`### ${g.id}${g.title ? '：' + g.title : ''}`];
+    if (g.description) lines.push(`- 目标描述：${g.description}`);
+    if (g.trigger) lines.push(`- 触发条件：${g.trigger}`);
+    const succ = splitList(g.success);
+    if (succ.length) {
+      lines.push('- 成功标准：');
+      succ.forEach((s) => lines.push(`  - [ ] ${s}`));
+    }
+    if (g.steps) lines.push(`- 执行步骤：${g.steps}`);
+    if (g.fallback) lines.push(`- 降级策略：${g.fallback}`);
+    if (g.constraint) lines.push(`- 约束条件：${g.constraint}`);
+    if (g.priority) lines.push(`- 优先级：${g.priority}`);
+    return lines;
+  };
+
+  const fix = goals.filter((g) => g.type === 'fix');
+  const enh = goals.filter((g) => g.type !== 'fix');
+  if (fix.length) {
+    body.push('## 3. 修复类目标 (Fix Goals)', '');
+    fix.forEach((g) => body.push(...renderGoal(g), ''));
+  }
+  if (enh.length) {
+    body.push('## 4. 优化类目标 (Enhancement Goals)', '');
+    enh.forEach((g) => body.push(...renderGoal(g), ''));
+  }
+
+  if (args.execution) body.push('## 5. 执行策略 (Execution Strategy)', args.execution.trim(), '');
+  if (args.verification) body.push('## 6. 验证规则 (Verification Rules)', args.verification.trim(), '');
+  if (args.termination) body.push('## 7. 终止条件 (Termination Conditions)', args.termination.trim(), '');
+
+  body.push('## 8. 状态追踪 (Status)', '', '| Goal ID | 状态 | 备注 |', '|---------|------|------|');
+  goals.forEach((g) => body.push(`| ${g.id} | 待执行 | - |`));
+  body.push('');
+
+  body.push('## 9. 迭代日志', '');
+  return head.concat(body).join('\n');
+};
+
 const registerGoalTools = async (tools) => {
   let tool;
   try {
@@ -1339,11 +1456,20 @@ const registerGoalTools = async (tools) => {
 
   tools['goal-set'] = tool({
     description:
-      '创建/管理 Goal 迭代目标。新建前必须已按开工模板问卷与用户澄清完毕（目标/背景/验收标准/红线/策略/异常预案）。默认 10 轮，mode=confirm 每轮确认/auto 连跑（auto 必须先完成 Pre-Flight 确认）；extend=true 追加轮次；maxIterations=0 无限需 confirmUnlimited=true。',
+      '创建/管理 Goal 迭代目标（目标清单按 GOAL_LIST.MD 标准格式）。新建前必须已按开工模板问卷与用户澄清完毕（核心使命/全局约束/目标清单[FIX+ENH]/执行策略/验证规则/终止条件/回滚约定）。默认 10 轮，mode=confirm 每轮确认/auto 连跑（auto 必须先完成 Pre-Flight 确认）；extend=true 追加轮次；maxIterations=0 无限需 confirmUnlimited=true。',
     args: {
-      goal: schema.string().describe('目标标题（一句话说清要达成的最终状态）'),
+      goal: schema.string().describe('目标标题（一句话说清要达成的最终状态，即核心使命）'),
+      mission: schema.string().optional().describe('核心使命完整描述（GOAL_LIST 标准区块 1）'),
+      globalConstraints: schema.string().optional().describe('全局约束（逗号/换行分隔，自动编号 GC-01…；GOAL_LIST 标准区块 2）'),
+      goals: schema
+        .string()
+        .optional()
+        .describe('子目标清单（JSON 数组，GOAL_LIST 标准区块 3/4）：[{"id":"FIX-01","type":"fix|enhancement","title":"...","description":"目标描述","trigger":"触发条件","success":"成功标准(可验证，多条用;分隔)","steps":"执行步骤","fallback":"降级策略","constraint":"约束条件","priority":"P0-P3"}]'),
+      execution: schema.string().optional().describe('执行策略：优先级排序/并行规则（允许/依赖/禁止）/暂停与恢复条件（GOAL_LIST 标准区块 5）'),
+      verification: schema.string().optional().describe('验证规则：通用 VR-XX + 各子目标专属验证（GOAL_LIST 标准区块 6）'),
+      termination: schema.string().optional().describe('终止条件：成功/提前/部分完成（GOAL_LIST 标准区块 7）'),
       background: schema.string().optional().describe('背景与现状：当前代码/环境情况、相关入口文件'),
-      criteria: schema.string().describe('可验证的完成标准，逗号分隔，每条尽量附验证命令，如 "npm test 全绿(npm test)"'),
+      criteria: schema.string().optional().describe('可验证的完成标准（无 goals 时的单目标回退，逗号分隔，每条尽量附验证命令，如 "npm test 全绿(npm test)"）'),
       constraints: schema.string().optional().describe('范围红线（逗号分隔）：禁止触碰的路径/系统/依赖；超出即 GOAL_STOP'),
       strategy: schema.string().optional().describe('迭代策略：每轮做什么类型的工作'),
       risks: schema.string().optional().describe('异常预案（逗号分隔，格式"情况→动作"），如 "构建连续失败3次→STOP,缺凭据→STOP"'),
@@ -1378,43 +1504,35 @@ const registerGoalTools = async (tools) => {
       if (max === 0 && !args.confirmUnlimited) {
         return 'maxIterations=0 是无限迭代，有持续消耗 token 的风险。确认无误请带 confirmUnlimited=true 重新调用。';
       }
-      const criteria = String(args.criteria || '').split(/[\n,，、;；]+/).map((s) => s.trim()).filter(Boolean);
-      if (!criteria.length) return 'criteria 不能为空：至少提供一条可验证的完成标准（命令输出/测试通过等）。';
+      const criteria = splitList(args.criteria);
+      let hasGoals = false;
+      try {
+        const g = JSON.parse(args.goals || '[]');
+        hasGoals = Array.isArray(g) && g.length > 0;
+      } catch {
+        hasGoals = false;
+      }
+      if (!hasGoals && !criteria.length) {
+        return 'criteria 不能为空：至少提供一条可验证的完成标准（命令输出/测试通过等），或传 goals 子目标清单（JSON 数组）。';
+      }
 
       const mode = args.mode === 'auto' ? 'auto' : 'confirm';
-      const sectionOf = (title, raw, sep = /[\n,，、;；]+/) => {
-        const items = String(raw || '').split(sep).map((s) => s.trim()).filter(Boolean);
-        return items.length ? [`## ${title}`, ...items.map((s) => `- ${s}`), ''] : [];
-      };
-      const content = [
-        `# GOAL: ${args.goal.trim()}`,
-        `- 模式：${mode}`,
-        `- 轮次：0/${max}`,
-        `- 创建：${new Date().toISOString()}`,
-        ...(args.background ? ['', '## 背景与现状', args.background.trim(), ''] : []),
-        '',
-        '## 验收标准',
-        ...criteria.map((c) => `- [ ] ${c}`),
-        '',
-        ...sectionOf('范围红线（触碰即 STOP）', args.constraints),
-        ...(args.strategy ? ['## 迭代策略', args.strategy.trim(), ''] : []),
-        ...sectionOf('异常预案', args.risks),
-        '## 迭代日志',
-        '',
-      ].join('\n');
+      const content = buildGoalDoc(args, mode, max);
       fs.writeFileSync(activePath, content, 'utf8');
       writeIndex(mem, { task: `[GOAL] ${args.goal}`, stage: '目标已设定' });
+
+      const nGoals = hasGoals ? JSON.parse(args.goals).length : 1;
       return [
-        `GOAL 已建立：.memory/goals/active.md`,
-        `目标：${args.goal.trim()}`,
-        `验收标准（${criteria.length} 条）：`,
-        ...criteria.map((c, i) => `${i + 1}. ${c}`),
+        `GOAL 已建立（GOAL_LIST.MD 标准格式）：.memory/goals/active.md`,
+        `核心使命：${args.goal.trim()}`,
+        `子目标：${nGoals} 个（${hasGoals ? 'FIX/ENH 拆分' : '单目标 FIX-01'}）`,
+        ...(splitList(args.globalConstraints).length ? [`全局约束：${splitList(args.globalConstraints).length} 条（GC 编号）`] : []),
         `轮次：0/${max === 0 ? '∞' : max}｜节奏：${mode === 'auto' ? 'auto 自动连跑（达标/达上限才停）' : 'confirm 每轮 question 请示'}`,
         args.constraints ? '⚠️ 已登记范围红线，触碰即停。' : '',
         '',
         mode === 'confirm'
-          ? '下一步：用 question 与用户最终确认标准，然后每轮以 goal-check(advance:true) 开始。'
-          : '下一步（auto 无人值守）：确认 Pre-Flight 已完成（标准可自动验证/红线明确/异常预案齐备），记录基线 commit hash 到日志，然后每轮以 goal-check(advance:true) 开始。',
+          ? '下一步：用 question 与用户最终确认目标清单，然后每轮以 goal-check(advance:true) 开始；每轮前后各建 git checkpoint。'
+          : '下一步（auto 无人值守）：确认 Pre-Flight 已完成（验证规则可自动执行/红线明确/异常预案齐备），记录基线 commit hash 到日志，然后每轮以 goal-check(advance:true) 开始。',
       ].filter(Boolean).join('\n');
     },
   });
@@ -1434,25 +1552,43 @@ const registerGoalTools = async (tools) => {
         fs.writeFileSync(path.join(memoryDir(context.directory), 'goals', 'active.md'), content, 'utf8');
       }
       const cur = goalRoundOf(content);
-      const open = (content.match(/^- \[ \] /gm) || []).length;
-      const done = (content.match(/^- \[x\] /gim) || []).length;
+      const { open, done } = countChecks(content);
       const goalTitle = (content.match(/^# GOAL: (.+)$/m) || [])[1] || '';
       const mode = (content.match(/^- 模式：(\w+)$/m) || [])[1] || 'confirm';
-      const constraints = content.match(/^## 范围红线[^\n]*\n([\s\S]*?)(?=\n## |\n## 迭代日志|$)/m);
+      const constraints =
+        content.match(/^## (?:2\. )?全局约束[^\n]*\n([\s\S]*?)(?=\n## |\n### )/m) ||
+        content.match(/^## 范围红线[^\n]*\n([\s\S]*?)(?=\n## |\n### )/m);
       const redlines = constraints ? (constraints[1].match(/^- .+$/gm) || []) : [];
 
+      const blocks = parseGoalBlocks(content);
       const lines = [
         '## GOAL 状态卡',
         `- 目标：${goalTitle}`,
         `- 轮次：${fmtRound(cur)}｜标准：${done} 达成 / ${open} 待办`,
         `- 本轮动作：${args.advance ? `进入第 ${cur.done} 轮` : '仅查看（未推进轮次）'}`,
-        ...(redlines.length ? [`- 🚫 红线（触碰即 GOAL_STOP）：`, ...redlines.map((l) => `  ${l}`)] : []),
-        '',
-        '防倒退契约：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下 question 用户（auto 模式按异常预案处理或输出 GOAL_STOP）。',
+        ...(redlines.length ? [`- 🚫 红线/全局约束（触碰即 GOAL_STOP）：`, ...redlines.map((l) => `  ${l}`)] : []),
         '',
       ];
+
+      if (blocks.length) {
+        lines.push('子目标进度（分步注入：完整清单在 .memory/goals/active.md，按需读取当前子目标详情，不整篇回显）：');
+        lines.push('| 子目标 | 优先级 | 进度 |');
+        lines.push('|--------|--------|------|');
+        for (const b of blocks) {
+          const tag = b.open === 0 && b.done > 0 ? '✅' : b.open === 0 ? '—' : '⏳';
+          lines.push(`| ${b.title} | ${b.priority || '—'} | ${tag} ${b.done}/${b.done + b.open} |`);
+        }
+        lines.push('');
+      }
+
+      lines.push('防倒退契约：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下 question 用户（auto 模式按异常预案处理或输出 GOAL_STOP）。');
+      lines.push('每轮 checkpoint：轮前记录基线（git commit/stash，hash 写入日志），轮末提交 checkpoint(goal): 第N轮 <摘要>；判定达标必须以真实命令输出为据。');
+      lines.push('');
+
       if (!open && done > 0) {
-        lines.push('✅ 全部验收标准达成 → 调用 goal-close(result:"achieved", summary) 收尾，回复末尾输出哨兵 GOAL_ACHIEVED。');
+        lines.push('✅ 全部验收标准已勾选 → 进入【总体验收】：逐条重跑全部验证规则（通用 VR + 各子目标专属）核对真实命令输出。');
+        lines.push('   验收全部通过 → goal-close(result:"achieved", summary) → save-progress → 回复末尾输出哨兵 GOAL_ACHIEVED。');
+        lines.push('   验收发现不合格 → 禁止 close：git reset --hard 回滚到最近 checkpoint(goal) 提交，把失败子目标标记回 - [ ]，日志记录原因与重做计划，继续下一轮打回重做。');
       } else if (cur.max !== 0 && cur.done >= cur.max) {
         lines.push('⛔ 已达轮次上限：禁止继续执行。必须 question 问用户——加轮次（goal-set extend:true, addIterations:N）或放弃（goal-close result:"abandoned"）。');
       } else {
@@ -1464,7 +1600,6 @@ const registerGoalTools = async (tools) => {
             ? '▶️ 未达标：继续执行本轮工作（auto 连跑，无人值守——遇异常预案情形直接 GOAL_STOP，不猜测不等待）。'
             : '▶️ 未达标：执行本轮工作，轮末用 question 向用户汇报结果并请示是否继续。'
         );
-        lines.push('轮末要求：把证据写回 .memory/goals/active.md（勾选标准 + 日志）+ git 提交 checkpoint(goal): 第N轮 <摘要>；判定达标必须以真实命令输出为据。');
       }
       return lines.join('\n');
     },
@@ -1544,14 +1679,24 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
 
       const isFirstUserMessage = output.messages.indexOf(lastUser) <= 1;
       const userText = getText(lastUser.parts).toLowerCase();
+      const agent = lastUser.info && lastUser.info.agent;
+      const exclusive = EXCLUSIVE_AGENTS.has(agent);
       const wantsToolkit = userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools');
       const route = matchRoute(userText);
       const injections = [];
 
-      if (wantsToolkit) {
-        injections.push(buildFullRoutingTable());
-      } else if (route) {
-        injections.push(buildRouteInjection(route, skillsDir));
+      if (!exclusive) {
+        if (wantsToolkit) {
+          injections.push(buildFullRoutingTable());
+        } else if (route) {
+          injections.push(buildRouteInjection(route, skillsDir));
+        }
+      } else {
+        injections.push([
+          '# junsi-dev-toolkit：独占模式（绕过常规路由）',
+          `当前 agent 为 \`${agent}\`（独占模式）。不注入开发子技能路由（diagnose/rdd 等），严格按本模式主 agent 指令执行；仍须遵守记忆类规范（store-decision/save-progress）。`,
+          INJECT_MARK,
+        ].join('\n'));
       }
 
       if (isFirstUserMessage) {
@@ -1668,19 +1813,21 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
         const active = readActiveGoal(directory);
         if (active && /^- 模式：auto$/m.test(active) && !goalIdleContinueBroken) {
           const r = goalRoundOf(active);
-          const open = (active.match(/^- \[ \] /gm) || []).length;
+          const open = countChecks(active).open;
           const limitHit = r.max !== 0 && r.done >= r.max;
-          const sid = event.properties?.info?.id ?? event.properties?.sessionID;
+          const sid = event.properties?.sessionID;
           if (!limitHit && open > 0 && sid) {
             try {
               await client.session.prompt({
-                sessionID: sid,
-                parts: [
-                  {
-                    type: 'text',
-                    text: '继续 Goal 迭代：调用 goal-check(advance:true)，严格按状态卡指令完成本轮。无人值守运行：遇范围红线/异常预案情形直接按预案 GOAL_STOP，不猜测不等待。',
-                  },
-                ],
+                path: { id: sid },
+                body: {
+                  parts: [
+                    {
+                      type: 'text',
+                      text: '继续 Goal 迭代：调用 goal-check(advance:true)，严格按状态卡指令完成本轮。无人值守运行：遇范围红线/异常预案情形直接按预案 GOAL_STOP，不猜测不等待。',
+                    },
+                  ],
+                },
               });
             } catch (e) {
               goalIdleContinueBroken = true;

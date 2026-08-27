@@ -32,7 +32,12 @@ description: 开发任务工具包。根据用户意图自动路由到专用子�
 
 ## Goal 模式
 
-Tab 切换到 `goal` agent：设定目标与**可验证验收标准**后多轮迭代推进，直到全部达标或达到轮次上限（默认 10，0=无限需二次确认）。专为无人值守设计：开工前按 **7 项模板问卷**澄清（目标/背景/验收标准附验证命令/范围红线/策略上限/**异常预案**/回滚约定），auto 模式开跑前必须 Pre-Flight 一次性确认。每轮以 `goal-check(advance:true)` 开始，轮末证据写回 `.memory/goals/active.md` 并提交 `checkpoint(goal)` 提交可回滚；防倒退契约（遗留标准优先、3 轮无进展熔断）。confirm 每轮 question 请示，auto 连跑且 idle 自驱续跑；哨兵 `GOAL_ACHIEVED`/`GOAL_STOP` 供 `scripts/goal-loop.ps1` 外部硬循环判停；活动 Goal 跨会话自动检测续跑。
+Tab 切换到 `goal` agent：按 **GOAL_LIST.MD 标准格式**建立目标清单（核心使命 / 全局约束 GC-XX / 修复类 FIX-XX + 优化类 ENH-XX 子目标（含目标描述·触发条件·成功标准·执行步骤·降级策略·优先级）/ 执行策略（优先级+并行规则）/ 验证规则 VR-XX / 终止条件 / 状态追踪），多轮迭代推进直到**总体验收通过**或达到轮次上限（默认 10，0=无限需二次确认）。专为无人值守设计：开工前按 7 区块模板问卷澄清，auto 模式开跑前必须 Pre-Flight 一次性确认。
+
+- **分步注入防污染**：`goal-check` 只返回精简状态卡（子目标进度表/红线/下一步），完整清单存 `.memory/goals/active.md`，按需读取当前子目标详情，不整篇回显。
+- **每轮 checkpoint**：轮前记录基线（git commit/stash + hash），轮末证据写回 `.memory/goals/active.md` 并提交 `checkpoint(goal): 第N轮 <摘要>` 可回滚；严禁 push。
+- **总体验收**：全部标准勾选后不得直接 close——先逐条重跑全部验证规则（通用 VR + 各子目标专属）核对真实命令输出；不合格 → `git reset --hard` 回滚到最近 checkpoint，失败子目标标记回 `- [ ]`，打回重做。
+- 防倒退契约（遗留标准优先、3 轮无进展熔断）；confirm 每轮 question 请示，auto 连跑且 idle 自驱续跑；哨兵 `GOAL_ACHIEVED`/`GOAL_STOP` 供 `scripts/goal-loop.ps1` 外部硬循环判停；活动 Goal 跨会话自动检测续跑。
 
 | 工具 | 触发时机 |
 |------|---------|
