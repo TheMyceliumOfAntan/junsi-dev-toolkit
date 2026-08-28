@@ -20,6 +20,9 @@ agent 回复中出现哨兵标记时自动停止。
 .PARAMETER TimeoutSeconds
 单轮执行超时（秒），超时判定进程卡死并终止循环，默认 900（15 分钟）。
 
+.PARAMETER MaxStallRounds
+连续 N 轮无实质进展（勾选标准数/checkpoint 提交数均无变化）即判定空转并终止，默认 2。
+
 .EXAMPLE
 pwsh scripts/goal-loop.ps1 -MaxLoops 20
 #>
@@ -28,11 +31,23 @@ param(
   [string]$Agent = 'goal',
   [string]$Prompt = '继续迭代：先调用 goal-check(advance:true)，严格按状态卡指令完成本轮。',
   [int]$IntervalSeconds = 2,
-  [int]$TimeoutSeconds = 900
+  [int]$TimeoutSeconds = 900,
+  [int]$MaxStallRounds = 2
 )
 
 $ErrorActionPreference = 'Continue'
-Write-Host "== Goal 外部硬循环启动：agent=$Agent, maxLoops=$MaxLoops, timeout=${TimeoutSeconds}s ==" -ForegroundColor Cyan
+$projectRoot = Split-Path $PSScriptRoot -Parent
+$activeFile = Join-Path $projectRoot '.memory\goals\active.md'
+Write-Host "== Goal 外部硬循环启动：agent=$Agent, maxLoops=$MaxLoops, timeout=${TimeoutSeconds}s, 无进展熔断=$MaxStallRounds 轮 ==" -ForegroundColor Cyan
+
+function Get-Progress {
+  $checks = 0
+  if (Test-Path -LiteralPath $activeFile) {
+    $checks = @(Select-String -LiteralPath $activeFile -Pattern '^\s*- \[x\] ' -AllMatches).Count
+  }
+  $log = & git -C $projectRoot log --oneline --fixed-strings --grep='checkpoint(goal)' 2>$null
+  return @{ Checks = $checks; Checkpoints = @($log).Count }
+}
 
 function Invoke-Round {
   param([string]$AgentName, [string]$PromptText, [int]$TimeoutSec)
@@ -51,6 +66,9 @@ function Invoke-Round {
   Remove-Job $job -Force
   return @{ Out = $out; Code = $code }
 }
+
+$prev = Get-Progress
+$stall = 0
 
 for ($i = 1; $i -le $MaxLoops; $i++) {
   Write-Host "`n== [loop $i/$MaxLoops] opencode run --agent $Agent ==" -ForegroundColor Cyan
@@ -71,12 +89,21 @@ for ($i = 1; $i -le $MaxLoops; $i++) {
   $text = $r.Out
   ($text -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 5) | ForEach-Object { Write-Host "  $_" }
 
+  $cur = Get-Progress
+  if ($cur.Checks -eq $prev.Checks -and $cur.Checkpoints -eq $prev.Checkpoints) { $stall++ } else { $stall = 0 }
+  Write-Host "  进展：标准达成 $($cur.Checks) 条 / checkpoint 提交 $($cur.Checkpoints) 次$(if ($stall) { "（无实质进展 x$stall）" })" -ForegroundColor DarkGray
+  $prev = $cur
+
   if ($text -match 'GOAL_ACHIEVED') {
     Write-Host "`n== GOAL_ACHIEVED：目标达成，循环结束 ==" -ForegroundColor Green
     break
   }
   if ($text -match 'GOAL_STOP|已达轮次上限|question') {
     Write-Host "`n== 循环停止：检测到中止哨兵/待人工决定（上限、确认请求）==" -ForegroundColor Yellow
+    break
+  }
+  if ($stall -ge $MaxStallRounds) {
+    Write-Host "`n== 连续 $MaxStallRounds 轮无实质进展（勾选标准数/checkpoint 提交均未变化），判定空转，终止循环 ==" -ForegroundColor Yellow
     break
   }
   Start-Sleep -Seconds $IntervalSeconds

@@ -1752,6 +1752,8 @@ const registerGoalTools = async (tools) => {
 
 export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
   let goalIdleContinueBroken = false;
+  let lastContinueAt = 0;
+  let lastContinueRound = -1;
   const skillsDir = path.resolve(__dirname, '../../.agents/skills/junsi-dev-toolkit');
   const tools = {};
   const toolState = await registerMemoryTools(tools);
@@ -1935,6 +1937,18 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
           const limitHit = r.max !== 0 && r.done >= r.max;
           const sid = event.properties?.sessionID;
           if (!limitHit && open > 0 && sid) {
+            const now = Date.now();
+            // 防刷屏三重保护：冷却节流 / 同轮次去重 / 会话忙检测
+            if (now - lastContinueAt < 30000 || r.done === lastContinueRound) return;
+            try {
+              const st = await client.session.status({ query: { directory } });
+              const status = (st && (st.data || st)) || {};
+              if (status[sid] && status[sid].type === 'busy') return;
+            } catch {
+              // status 不可用不阻塞，仅靠节流/去重兜底
+            }
+            lastContinueAt = now;
+            lastContinueRound = r.done;
             try {
               await client.session.prompt({
                 path: { id: sid },
