@@ -52,6 +52,12 @@
 | `cluster-backend` | 后端实现 | DeepSeek V4 Flash |
 | `cluster-qa` | 测试/构建验证 | GLM-5.2 |
 | `cluster-docs` | 文档/ADR | GLM-5.2 |
+| `cluster-reviewer` | 代码审查、diff 风险评分（只读） | DeepSeek V4 Pro |
+| `cluster-security` | 漏洞扫描、注入/敏感信息检测（只读+扫描） | DeepSeek V4 Pro |
+| `cluster-architect` | 架构设计、DDD、技术选型（产出设计文档） | DeepSeek V4 Pro |
+| `cluster-performance` | 性能剖析、瓶颈定位、优化 | DeepSeek V4 Flash |
+| `cluster-devops` | CI/CD、构建脚本、容器化、迁移 | DeepSeek V4 Flash |
+| `cluster-data` | 数据库设计、SQL 优化、API 契约 | DeepSeek V4 Pro |
 
 模型按本机实际配置（auth.json / 环境变量）自动检测注入；任务分配时用 `question` 工具向用户确认方案。
 

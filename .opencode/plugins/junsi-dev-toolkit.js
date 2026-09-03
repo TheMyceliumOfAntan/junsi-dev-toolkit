@@ -198,6 +198,45 @@ const MEMORY_LIMITS = {
   compactPreference: 800,
   compactIndex: 20 * 1024,
   doctorHandoffStaleDays: 7,
+  routeStateTtlMs: 30 * 60 * 1000, // 路由状态30分钟过期
+};
+
+/* 路由状态持久化：防止用户补充条件时路由偏离 */
+const routeStatePath = (projectDir) => path.join(memoryDir(projectDir), 'route-state.json');
+
+const readRouteState = (projectDir) => {
+  try {
+    const p = routeStatePath(projectDir);
+    if (!fs.existsSync(p)) return null;
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    // 过期自动清除
+    if (data.activatedAt && Date.now() - new Date(data.activatedAt).getTime() > MEMORY_LIMITS.routeStateTtlMs) {
+      fs.unlinkSync(p);
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+};
+
+const writeRouteState = (projectDir, routeId) => {
+  const mem = memoryDir(projectDir);
+  fs.mkdirSync(mem, { recursive: true });
+  const state = {
+    activeRoute: routeId,
+    activatedAt: new Date().toISOString(),
+    locked: true,
+  };
+  fs.writeFileSync(routeStatePath(projectDir), JSON.stringify(state, null, 2), 'utf8');
+  return state;
+};
+
+const clearRouteState = (projectDir) => {
+  try {
+    const p = routeStatePath(projectDir);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch {}
 };
 
 const memoryDir = (projectDir) => path.join(projectDir, '.memory');
@@ -426,6 +465,10 @@ const registerMemoryTools = async (tools) => {
       fs.writeFileSync(file, content, 'utf8');
       const idx = writeIndex(mem, { task: args.task, stage: args.stage });
       appendSessionTrace(mem, { task: args.task, stage: args.stage, source: 'save-progress' });
+      // 任务完成（VERIFY）时自动解锁路由，允许下次新意图重新匹配
+      if (args.stage && args.stage.toUpperCase() === 'VERIFY') {
+        clearRouteState(context.directory);
+      }
       return `进度已保存: ${file}\n${idx.message}`;
     },
   });
@@ -1051,6 +1094,60 @@ const buildClusterAgents = (models, skillsDir) => {
     permission: { edit: 'allow', bash: 'deny' },
   });
 
+  agents['cluster-reviewer'] = makeAgent({
+    type: 'bugfix',
+    description: 'Cluster 代码审查 Subagent：diff 审查、风险评分、回归风险与修改建议（只读分析，不直接改代码）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'deny', bash: 'allow' },
+  });
+
+  agents['cluster-security'] = makeAgent({
+    type: 'bugfix',
+    description: 'Cluster 安全 Subagent：漏洞扫描、注入/XSS/敏感信息检测、CVE 比对（bash 可跑扫描工具，修复建议不改码）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'deny', bash: 'allow' },
+  });
+
+  agents['cluster-architect'] = makeAgent({
+    type: 'feature',
+    description: 'Cluster 架构 Subagent：模块划分、DDD、技术选型权衡、ADR 草案（只读分析，产出设计文档）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'], { domain: 'text' }) || anyModel(),
+    temperature: 0.3,
+    permission: { edit: 'allow', bash: 'deny' },
+  });
+
+  agents['cluster-performance'] = makeAgent({
+    type: 'bugfix',
+    description: 'Cluster 性能 Subagent：剖析热点、定位瓶颈、优化算法与 IO（可改代码，改动需最小化）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-devops'] = makeAgent({
+    type: 'backend',
+    description: 'Cluster DevOps Subagent：CI/CD 流水线、构建脚本、容器化、数据库迁移脚本',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-data'] = makeAgent({
+    type: 'backend',
+    description: 'Cluster 数据 Subagent：数据库设计、SQL 优化、索引策略、API 数据契约',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
   agents['penetration'] = {
     description: 'Penetration 渗透测试模式：OWASP WSTG 流程 + WSL 工具（wsl-pentest MCP），报告写入 docs/penetration-reports/',
     mode: 'primary',
@@ -1170,8 +1267,8 @@ const registerClusterTools = async (tools, skillsDir) => {
       const usePlan = args.usePlan || 'auto';
       const domainOf = (type) => {
         if (type === 'frontend') return 'webdev';
-        if (type === 'qa') return 'coding';
-        if (type === 'planner') return 'text';
+        if (type === 'qa' || type === 'reviewer' || type === 'security' || type === 'performance' || type === 'devops' || type === 'data') return 'coding';
+        if (type === 'planner' || type === 'architect') return 'text';
         return 'coding';
       };
       const preferred = {
@@ -1180,6 +1277,12 @@ const registerClusterTools = async (tools, skillsDir) => {
         backend: ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
         qa: ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
         docs: ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        reviewer: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        security: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        architect: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
+        performance: ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'],
+        devops: ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'],
+        data: ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash'],
       };
       const needsVision = (type, name) =>
         type === 'frontend' || /截图|看图|页面|界面|ui|视觉|样式|布局/i.test(name || '');
@@ -1743,6 +1846,8 @@ const registerGoalTools = async (tools) => {
       fs.unlinkSync(path.join(mem, 'goals', 'active.md'));
       const idx = writeIndex(mem, { task: `[GOAL] ${title}`, stage: `已归档（${label}）` });
       appendSessionTrace(mem, { task: `[GOAL] ${title}`, stage: args.result, source: 'goal-close' });
+      // Goal 完成时自动解锁路由
+      clearRouteState(context.directory);
       return `GOAL 已归档（${label}）: ${file}\n${idx.message}\n别忘了 save-progress。`;
     },
   });
@@ -1802,8 +1907,23 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
       const agent = lastUser.info && lastUser.info.agent;
       const exclusive = EXCLUSIVE_AGENTS.has(agent);
       const wantsToolkit = userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools');
-      const route = matchRoute(userText);
+      const newRoute = matchRoute(userText);
       const injections = [];
+
+      // 手动切换路由 / 独占模式 / 显式查看路由表 → 解除路由锁定
+      const wantsSwitch = userText.includes('切换路由') || userText.includes('换流程') || userText.includes('重新匹配');
+
+      // 路由锁定：复用已激活路由，防止用户补充条件时偏离；
+      // 更高优先级的新意图才抢占；每次命中续期（滑动30分钟过期）
+      let route = null;
+      if (exclusive || wantsToolkit || wantsSwitch) {
+        clearRouteState(directory);
+      } else {
+        const routeState = readRouteState(directory);
+        const locked = routeState && routeState.locked ? ROUTES.find((r) => r.id === routeState.activeRoute) : null;
+        route = newRoute && (!locked || newRoute.priority > locked.priority) ? newRoute : locked || newRoute;
+        if (route) writeRouteState(directory, route.id);
+      }
 
       if (!exclusive) {
         if (wantsToolkit) {
