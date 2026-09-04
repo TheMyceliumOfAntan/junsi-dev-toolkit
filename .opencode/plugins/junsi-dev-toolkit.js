@@ -184,9 +184,8 @@ const getText = (parts) => {
     .join('\n');
 };
 
-const hasInjection = (parts) => {
-  return Array.isArray(parts) && parts.some((p) => p && p.type === 'text' && p.text.includes(INJECT_MARK));
-};
+/* 已 transform 过的 lastUser.parts（WeakSet 按对象身份判重，不依赖文本标记，避免用户粘贴含标记内容时误跳过注入） */
+const seenUserParts = new WeakSet();
 
 const MEMORY_LIMITS = {
   indexLines: 200,
@@ -1900,13 +1899,13 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
       if (!output.messages || !output.messages.length) return;
       const lastUser = getLastUserMessage(output.messages);
       if (!lastUser || !Array.isArray(lastUser.parts)) return;
-      if (hasInjection(lastUser.parts)) return;
+      if (seenUserParts.has(lastUser.parts)) return;
 
       const isFirstUserMessage = output.messages.indexOf(lastUser) <= 1;
       const userText = getText(lastUser.parts).toLowerCase();
       const agent = lastUser.info && lastUser.info.agent;
       const exclusive = EXCLUSIVE_AGENTS.has(agent);
-      const wantsToolkit = userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools');
+      const wantsToolkit = (userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools')) && (userText.includes('路由表') || userText.includes('routing table'));
       const newRoute = matchRoute(userText);
       const injections = [];
 
@@ -1976,6 +1975,7 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
         for (const text of texts) {
           lastUser.parts.unshift({ ...ref, type: 'text', text });
         }
+        seenUserParts.add(lastUser.parts);
       }
     },
 
