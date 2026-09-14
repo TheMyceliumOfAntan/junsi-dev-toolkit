@@ -46,7 +46,7 @@ const ROUTES = [
     priority: 4,
     skillPath: '.agents/skills/junsi-dev-toolkit/diagnose-before-fix/SKILL.md',
     summary: 'Bug 修复 8 步：理解 → 枚举原因 → 问方向 → 修复 → Build 验证 → 原始复测',
-    keywords: ['报错', '不对', '不工作', '返回错误', '空列表', '崩溃', '白屏', 'bug', '异常', '闪退'],
+    keywords: ['报错', '不对', '不工作', '返回错误', '空列表', '崩溃', '白屏', 'bug', '异常', '闪退', '全黑', '黑屏', '花屏', '卡顿', '很卡', '变卡', '很慢', '太慢', '变慢', '卡住', '没响应', '失效', '没生效', '不生效', '没反应', '无反应', '不加载', '加载不出来', '显示异常'],
   },
   {
     id: 'advisor',
@@ -1929,6 +1929,10 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
           injections.push(buildFullRoutingTable());
         } else if (route) {
           injections.push(buildRouteInjection(route, skillsDir));
+        } else if (isFirstUserMessage) {
+          // 兜底：首条消息未命中任何关键词时，仍注入路由表，
+          // 避免模型不知道路由/工具存在而退回 bash+read 裸干（省 token：仅首条一次）
+          injections.push(buildFullRoutingTable());
         }
       } else {
         injections.push([
