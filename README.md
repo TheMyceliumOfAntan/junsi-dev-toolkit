@@ -164,7 +164,7 @@ pwsh scripts/verify-install.ps1 -Full
 
 - **插件路由**：`junsi-dev-toolkit.js` 正则匹配开发意图关键词，命中才注入精简指令；首条消息无命中时兜底注入一次精简路由表；HANDOFF 检测与 memory 工具由插件承载。
 - **MCP 定范围**：路由前直接调 MCP 工具定位目录/端点/组件/文件，子技能只在范围内精细解析。
-- **MCP 工具**：`project_tree`、`api_endpoints`、`frontend_routes`、`component_inventory`、`project_config`、`tauri_commands`、`tauri_capabilities`、`api_client`、`stores`、`hooks`、`code_context`、`query_docs`、`create_adr`、`update_doc`、`generate_docs`。
+- **MCP 工具**：`project_tree`、`api_endpoints`、`frontend_routes`、`component_inventory`、`project_config`、`tauri_commands`、`tauri_capabilities`、`api_client`、`stores`、`hooks`、`code_context`、`query_docs`、`create_adr`、`update_doc`、`generate_docs`、`index_docs`、`organize_docs`、`revert_docs`、`tag_docs`、`list_tags`。
 - **Memory 工具**：插件注册 7 个真实工具，`.memory/` 目录持久化进度（含历史版本）和决策，HANDOFF 支持跨会话恢复；`~/.config/opencode/.memory/` 承载跨项目全局偏好与决策。
 
 ## 快速使用

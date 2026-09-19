@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,9 @@ CATEGORIES = {
     "8-部署运维": "部署架构、环境配置",
     "9-系统要求": "功能需求、非功能需求",
 }
+
+DOCS_SCAN_ROOT = PROJECT_ROOT / "docs"
+INDEX_FILE = DOCS_ROOT / "docs-index.json"
 
 app = Server("project-docs")
 
@@ -102,25 +106,423 @@ def tag(path: str) -> str:
     tags = ' '.join(filter(None, [f'[{lang}]' if lang else '', layer]))
     return f"{tags} {path}" if tags else path
 
-# ── 文档工具（原） ─────────────────────────────────────────
+# ── 文档扫描 / 索引 / 标签 ─────────────────────────────────
 
-def search_docs(keywords: str, category: Optional[str] = None) -> List[Dict[str, str]]:
+IGNORE_DIRS = {"node_modules", ".git", ".github", ".venv", "venv",
+               "dist", "build", "__pycache__", ".idea", ".vscode"}
+_ROOT_META = {"readme.md", "agents.md", "claude.md", "codeowners"}
+_ROOT_META_PREFIX = ("license", "changelog", "contributing", "install",
+                     "code_of_conduct", "security.md", "support.md")
+
+_CAT_KEYWORDS = {
+    "1-决策记录": ["adr", "决策", "decision record", "architecture decision"],
+    "2-架构设计": ["架构", "architecture", "模块", "module", "subsystem",
+                   "overview", "primer", "design", "设计", "lifecycle"],
+    "3-API规范": ["api", "接口", "endpoint", "rpc", "rest", "gateway"],
+    "4-编码规范": ["规范", "convention", "style guide", "coding", "guideline", "lint"],
+    "5-数据库设计": ["数据库", "database", "persistence", "schema", "sql", "migration", "表结构"],
+    "6-UI/组件设计": ["ui", "组件", "component", "css", "theme", "样式", "styling"],
+    "7-调用规范": ["调用", "invoke", "异常", "error handling", "日志", "logging", "defensive"],
+    "8-部署运维": ["部署", "deploy", "运维", "release", "build", "ci"],
+    "9-系统要求": ["需求", "requirement", "tutorial", "cookbook", "guide", "教程",
+                   "glossary", "user guide"],
+}
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _norm_list(x) -> List[str]:
+    if not x: return []
+    if isinstance(x, str):
+        return [t.strip().lower() for t in re.split(r"[,\s\n]+", x) if t.strip()]
+    return [str(t).strip().lower() for t in x if str(t).strip()]
+
+
+def _companion_base_name(name: str) -> Optional[str]:
+    for suf in (".zh.md", ".i18n.yaml", ".schema.json"):
+        if name.endswith(suf):
+            return name[: -len(suf)] + ".md"
+    return None
+
+
+def _iter_md(root: Path, recursive: bool = True):
+    if not root.exists(): return
+    if recursive:
+        for dp, dns, fns in os.walk(str(root)):
+            dns[:] = [d for d in dns if d not in IGNORE_DIRS and not d.startswith(".")]
+            for fn in fns:
+                if fn.endswith(".md"):
+                    yield Path(dp) / fn
+    else:
+        for fn in os.listdir(root):
+            fp = root / fn
+            if fp.is_file() and fn.endswith(".md"):
+                yield fp
+
+
+def _is_root_meta(name: str) -> bool:
+    n = name.lower()
+    return n in _ROOT_META or n.startswith(_ROOT_META_PREFIX)
+
+
+def _doc_title(fp: Path) -> str:
+    m = re.search(r"^#\s+(.+)$", read_file(fp), re.MULTILINE)
+    return m.group(1).strip() if m else fp.stem
+
+
+def _path_tags(path: str) -> List[str]:
+    """从路径的目录段派生标签（原功能结构）。"""
+    p = (path or "").replace("\\", "/")
+    if p.startswith("docs/junsi-dev-docs/"):
+        rest = p[len("docs/junsi-dev-docs/"):]
+    elif p.startswith("docs/"):
+        rest = p[len("docs/"):]
+    else:
+        rest = p
+    out = []
+    for seg in rest.split("/")[:-1]:
+        seg = seg.strip().lower()
+        if seg and seg != "junsi-dev-docs":
+            out.append(seg)
+    return out
+
+
+def _doc_tags(d: Dict[str, Any]) -> List[str]:
+    src = d.get("original_path") or d.get("path", "")
+    return sorted(set(_path_tags(src)) | set(_norm_list(d.get("explicit_tags"))))
+
+
+def load_index() -> Dict[str, Any]:
+    if INDEX_FILE.exists():
+        try:
+            return json.loads(read_file(INDEX_FILE)) or {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _index_entries() -> Dict[str, Dict[str, Any]]:
+    return {d["path"]: d for d in load_index().get("docs", []) if d.get("path")}
+
+
+def _recompute_tags(index: Dict[str, Any]) -> None:
+    tag_map: Dict[str, List[str]] = {}
+    for d in index.get("docs", []):
+        d["tags"] = _doc_tags(d)
+        for t in d["tags"]:
+            tag_map.setdefault(t, []).append(d["path"])
+    index["tags"] = tag_map
+
+
+def _scan_units(roots: Optional[List[str]] = None,
+                include_root: bool = True) -> List[Dict[str, Any]]:
+    """扫描散落文档，按 i18n 三件套合并为文档单元。"""
+    md_files: List[Path] = list(_iter_md(DOCS_SCAN_ROOT, True))
+    if include_root:
+        md_files += list(_iter_md(PROJECT_ROOT, False))
+    for r in (roots or []):
+        md_files += list(_iter_md(PROJECT_ROOT / str(r).replace("/", os.sep), True))
+
+    doc_root = DOCS_ROOT.resolve()
+    proj_root = PROJECT_ROOT.resolve()
+    seen, primaries = set(), []
+    for fp in md_files:
+        key = str(fp.resolve())
+        if key in seen: continue
+        seen.add(key)
+        if fp.resolve() == INDEX_FILE.resolve(): continue
+        if fp.name.lower() == "readme.md" and fp.parent.resolve() == doc_root:
+            continue  # 工具生成的索引
+        if fp.name.endswith(".zh.md"):
+            base = fp.with_name(_companion_base_name(fp.name) or "")
+            if base.exists():
+                continue  # 由主文档统一处理
+        primaries.append(fp)
+
+    units = []
+    for fp in primaries:
+        if fp.parent.resolve() == proj_root and _is_root_meta(fp.name):
+            continue
+        name = fp.name
+        stem = None if name.endswith(".zh.md") else name[:-3]
+        zh = i18n = schema = None
+        if stem:
+            for suf, key in ((".zh.md", "zh"), (".i18n.yaml", "i18n"), (".schema.json", "schema")):
+                cand = fp.with_name(stem + suf)
+                if cand.exists():
+                    if key == "zh": zh = safe_relative(cand)
+                    elif key == "i18n": i18n = safe_relative(cand)
+                    else: schema = safe_relative(cand)
+        units.append({"path": safe_relative(fp), "title": _doc_title(fp),
+                      "zh": zh, "i18n": i18n, "schema": schema})
+    return units
+
+
+def _build_index(roots: Optional[List[str]] = None,
+                 include_root: bool = True) -> Dict[str, Any]:
+    old = _index_entries()
+    index: Dict[str, Any] = {"version": 1, "updated": _now(), "docs": []}
+    seen = set()
+    for u in _scan_units(roots, include_root):
+        seen.add(u["path"])
+        prev = old.get(u["path"], {})
+        index["docs"].append({
+            "path": u["path"], "title": u["title"],
+            "original_path": prev.get("original_path"),
+            "explicit_tags": prev.get("explicit_tags", []),
+            "zh": u["zh"], "i18n": u["i18n"], "schema": u["schema"],
+        })
+    for p, d in old.items():
+        if p in seen: continue
+        if (PROJECT_ROOT / p.replace("/", os.sep)).exists():
+            index["docs"].append(d)
+    index["docs"].sort(key=lambda x: x["path"])
+    _recompute_tags(index)
+    return index
+
+
+def save_index(index: Dict[str, Any]) -> None:
+    index["updated"] = _now()
+    write_file(INDEX_FILE, json.dumps(index, ensure_ascii=False, indent=2))
+    _update_readme(index)
+
+
+def _suggest_category(path: str, title: str, content: str) -> Optional[str]:
+    hay = f"{path} {title} {content[:4000]}".lower()
+    best, score = None, 0
+    for cat, kws in _CAT_KEYWORDS.items():
+        s = sum(hay.count(k) for k in kws)
+        if s > score:
+            best, score = cat, s
+    return best
+
+
+def search_docs(keywords: str = "", category: Optional[str] = None,
+                tags: Optional[List[str]] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    idx = _index_entries()
+    want = _norm_list(tags)
+    terms = [k.strip().lower() for k in (keywords or "").split(",") if k.strip()]
     results = []
-    terms = [k.strip().lower() for k in keywords.split(",") if k.strip()]
-    base = DOCS_ROOT / category if category else DOCS_ROOT
-    for fp in base.glob("**/*.md"):
-        if fp.name == "README.md": continue
-        content = read_file(fp)
-        if not content: continue
-        cl = content.lower()
-        if all(t in cl for t in terms):
-            title = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-            results.append({
-                "path": safe_relative(fp, DOCS_ROOT),
-                "title": title.group(1) if title else fp.stem,
-                "summary": content[:200].replace("\n", " ") + "..."
-            })
-    return results[:10]
+    for u in _scan_units():
+        rel = u["path"]
+        if category and not rel.startswith(f"docs/junsi-dev-docs/{category}/"):
+            continue
+        prev = idx.get(rel, {})
+        d = {"path": rel, "original_path": prev.get("original_path"),
+             "explicit_tags": prev.get("explicit_tags", [])}
+        d_tags = _doc_tags(d)
+        if want and not all(t in d_tags for t in want):
+            continue
+        body = read_file(PROJECT_ROOT / rel)
+        if terms and not all(t in (body + "\n" + u["title"]).lower() for t in terms):
+            continue
+        results.append({"path": rel, "title": u["title"], "tags": d_tags,
+                        "original_path": d["original_path"],
+                        "summary": body[:200].replace("\n", " ") + "..."})
+    return results[:limit]
+
+
+# ── 归档 / 回滚 ────────────────────────────────────────────
+
+def _slug_of(path: str) -> str:
+    p = path.replace("\\", "/")
+    rel = p[len("docs/"):] if p.startswith("docs/") else p
+    if rel.endswith(".md"): rel = rel[:-3]
+    return rel.replace("/", "--")
+
+
+def _move_file(src: Path, dest: Path) -> bool:
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            return False
+        shutil.move(str(src), str(dest))
+        return True
+    except Exception:
+        return False
+
+
+def _parse_assignments(assignments) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not assignments: return out
+    if isinstance(assignments, dict):
+        items = list(assignments.items())
+    else:
+        items = [(a.get("path", ""), a.get("category", "")) for a in assignments]
+    for p, c in items:
+        p = str(p).replace("\\", "/").strip()
+        c = str(c).strip()
+        if p and c in CATEGORIES:
+            out[p] = c
+    return out
+
+
+def _move_unit(u: Dict[str, Any], category: str) -> Dict[str, Any]:
+    src = PROJECT_ROOT / u["path"].replace("/", os.sep)
+    dest_dir = DOCS_ROOT / category
+    slug = _slug_of(u["path"])
+    dest = dest_dir / f"{slug}.md"
+    n = 2
+    while dest.exists():
+        dest = dest_dir / f"{slug}-{n}.md"; n += 1
+    _move_file(src, dest)
+    m = {"path": safe_relative(dest), "original_path": u["path"], "title": u["title"],
+         "explicit_tags": [], "zh": None, "i18n": None, "schema": None}
+    for suf, key in ((".zh.md", "zh"), (".i18n.yaml", "i18n"), (".schema.json", "schema")):
+        if u.get(key):
+            csrc = PROJECT_ROOT / u[key].replace("/", os.sep)
+            if csrc.exists():
+                cdest = dest.with_name(dest.name[:-3] + suf)
+                if _move_file(csrc, cdest):
+                    m[key] = safe_relative(cdest)
+    return m
+
+
+def run_index_docs(dry_run: bool = False, roots=None, include_root: bool = True) -> str:
+    old = set(_index_entries().keys())
+    index = _build_index(roots, include_root)
+    new = [d["path"] for d in index["docs"] if d["path"] not in old]
+    lines = [f"🗂️ 索引{'预览' if dry_run else '完成'}：共 {len(index['docs'])} 个文档，"
+             f"{len(index.get('tags', {}))} 个标签"]
+    if new:
+        lines.append(f"新增登记 {len(new)} 个：")
+        lines += [f"  + {p}" for p in new[:25]]
+        if len(new) > 25: lines.append(f"  ... 共 {len(new)} 个")
+    if not dry_run:
+        save_index(index)
+        lines.append(f"已写入 `{safe_relative(INDEX_FILE, DOCS_ROOT)}` 并刷新 README.md")
+    return "\n".join(lines)
+
+
+def run_tag_docs(paths, tags, mode: str = "add") -> str:
+    index = _build_index()
+    docs = {d["path"]: d for d in index["docs"]}
+    if isinstance(paths, str):
+        plist = [s.strip() for s in re.split(r"[,\n]+", paths) if s.strip()]
+    else:
+        plist = [str(p).strip() for p in (paths or [])]
+    tlist = _norm_list(tags)
+    if not plist or not tlist:
+        return "❌ 需要 paths 和 tags 参数"
+    changed = []
+    for p in plist:
+        key = p.replace("\\", "/")
+        if key not in docs and f"docs/{key}" in docs:
+            key = f"docs/{key}"
+        if key not in docs:
+            fp = PROJECT_ROOT / key.replace("/", os.sep)
+            if fp.exists() and fp.suffix.lower() == ".md":
+                docs[key] = {"path": key, "title": _doc_title(fp), "original_path": None,
+                             "explicit_tags": [], "zh": None, "i18n": None, "schema": None}
+            else:
+                continue
+        ex = set(_norm_list(docs[key].get("explicit_tags")))
+        if mode == "remove": ex -= set(tlist)
+        elif mode == "set": ex = set(tlist)
+        else: ex |= set(tlist)
+        docs[key]["explicit_tags"] = sorted(ex)
+        changed.append(key)
+    index["docs"] = sorted(docs.values(), key=lambda x: x["path"])
+    _recompute_tags(index)
+    save_index(index)
+    verb = {"add": "追加", "remove": "移除", "set": "设置"}.get(mode, "更新")
+    return f"✅ 已{verb}标签 {tlist} → {len(changed)} 个文档：\n" + \
+           "\n".join(f"  {p}" for p in changed)
+
+
+def run_list_tags(tag: Optional[str] = None) -> str:
+    index = load_index() or _build_index()
+    tag_map = index.get("tags", {})
+    if tag:
+        t = tag.strip().lower()
+        docs = tag_map.get(t)
+        if not docs:
+            return f"📭 无标签 `{t}`"
+        return trunc(f"🏷️ 标签 `{t}`（{len(docs)}）:\n" +
+                     "\n".join(f"  {p}" for p in docs), 2500)
+    if not tag_map:
+        return "📭 暂无标签"
+    lines = [f"🏷️ 共 {len(tag_map)} 个标签：", ""]
+    for t in sorted(tag_map, key=lambda k: (-len(tag_map[k]), k)):
+        lines.append(f"  {t:24s} {len(tag_map[t]):3d}")
+    return trunc("\n".join(lines), 2500)
+
+
+def run_organize(dry_run: bool = True, assignments=None, roots=None,
+                 include_root: bool = True) -> str:
+    assigned = _parse_assignments(assignments)
+    units = [u for u in _scan_units(roots, include_root)
+             if not u["path"].startswith("docs/junsi-dev-docs/")]
+    if not units:
+        return "✅ 没有待归档的散落文档。"
+
+    if dry_run:
+        lines = [f"📂 待归档 {len(units)} 个文档（dry_run，未移动）：", ""]
+        for u in units:
+            cat = assigned.get(u["path"]) or _suggest_category(
+                u["path"], u["title"], read_file(PROJECT_ROOT / u["path"]))
+            reason = "显式指定" if u["path"] in assigned else ("启发式建议" if cat else "未能分类")
+            lines.append(f"  {'→' if cat else '✗'} {u['path']}")
+            lines.append(f"      分类: {cat or '需手动指定'} ({reason})")
+            if cat:
+                lines.append(f"      目标: docs/junsi-dev-docs/{cat}/{_slug_of(u['path'])}.md")
+        lines += ["", "💡 确认后传 assignments=[{path,category}] 且 dry_run=false 执行移动。"]
+        return trunc("\n".join(lines), 4500)
+
+    moved = [_move_unit(u, assigned[u["path"]])
+             for u in units if u["path"] in assigned]
+    if not moved:
+        return "⚠️ 未提供显式分类，未移动任何文件。请在 assignments 中指定 path→category。"
+
+    index = _build_index(roots, include_root)
+    by_path = {d["path"]: d for d in index["docs"]}
+    for m in moved:
+        d = by_path.get(m["path"])
+        if d:
+            d["original_path"] = m["original_path"]
+    _recompute_tags(index)
+    save_index(index)
+    lines = [f"✅ 已归档 {len(moved)} 个文档（原位置已转为标签）：", ""]
+    for m in moved:
+        lines.append(f"  {m['original_path']}\n    → {m['path']}")
+    return trunc("\n".join(lines), 4500)
+
+
+def run_revert(dry_run: bool = True, paths=None) -> str:
+    index = load_index()
+    targets = [d for d in index.get("docs", []) if d.get("original_path")]
+    if isinstance(paths, list):
+        plist = [str(p).replace("\\", "/").strip() for p in paths if str(p).strip()]
+    else:
+        plist = [s.strip().replace("\\", "/") for s in re.split(r"[,\n]+", paths or "") if s.strip()]
+    if plist:
+        targets = [d for d in targets if d["path"] in plist or d["original_path"] in plist]
+    if not targets:
+        return "📭 没有可回滚的归档文档"
+    if dry_run:
+        lines = [f"⏪ 可回滚 {len(targets)} 个文档（dry_run，未移动）：", ""]
+        for d in targets:
+            lines.append(f"  {d['path']}\n    → {d['original_path']}")
+        return trunc("\n".join(lines), 4500)
+
+    done = []
+    for d in targets:
+        src = PROJECT_ROOT / d["path"].replace("/", os.sep)
+        dst = PROJECT_ROOT / d["original_path"].replace("/", os.sep)
+        if not src.exists():
+            continue
+        base = d["original_path"][:-3] if d["original_path"].endswith(".md") else d["original_path"]
+        if _move_file(src, dst):
+            for suf, key in ((".zh.md", "zh"), (".i18n.yaml", "i18n"), (".schema.json", "schema")):
+                if d.get(key):
+                    csrc = PROJECT_ROOT / d[key].replace("/", os.sep)
+                    if csrc.exists():
+                        _move_file(csrc, PROJECT_ROOT / (base + suf).replace("/", os.sep))
+            done.append(d["original_path"])
+    save_index(_build_index())
+    return f"✅ 已回滚 {len(done)} 个文档：\n" + "\n".join(f"  {p}" for p in done)
 
 def create_adr_file(title: str, background: str, decision: str,
                     alternatives: Optional[List[Dict]] = None,
@@ -174,20 +576,41 @@ def create_adr_file(title: str, background: str, decision: str,
         return f"✅ ADR 已创建：`{safe_relative(fp, DOCS_ROOT)}`"
     return "❌ 创建失败"
 
-def _update_readme():
-    lines = ["# 项目文档索引",
-             f"最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+def _rel_link(p: str) -> str:
+    fp = PROJECT_ROOT / p.replace("/", os.sep)
+    try:
+        return os.path.relpath(str(fp), str(DOCS_ROOT)).replace("\\", "/")
+    except Exception:
+        return p
+
+
+def _update_readme(index: Optional[Dict[str, Any]] = None) -> None:
+    index = index or _build_index()
+    lines = ["# 项目文档索引", f"最后更新：{_now()}", ""]
     for cat, desc in CATEGORIES.items():
         d = DOCS_ROOT / cat
         lines += [f"## {cat}", "", f"*{desc}*", ""]
         if d.exists():
-            for f in d.glob("*.md"):
+            for f in sorted(d.glob("*.md")):
                 if f.name == "README.md": continue
-                title = re.search(r"^#\s+(.+)$", read_file(f), re.MULTILINE)
-                t = title.group(1) if title else f.stem
-                lines.append(f"- [{t}]({cat}/{f.name})")
+                lines.append(f"- [{_doc_title(f)}]({cat}/{f.name})")
         else:
             lines.append("（暂无文档）")
+        lines.append("")
+
+    archived = [d for d in index.get("docs", []) if d.get("original_path")]
+    if archived:
+        lines += ["## 归档文档（原位置 → 现位置）", ""]
+        for d in sorted(archived, key=lambda x: x.get("original_path", "")):
+            lines.append(f"- [{d['title']}]({_rel_link(d['path'])})  ← `{d['original_path']}`")
+        lines.append("")
+
+    tag_map = index.get("tags", {})
+    if tag_map:
+        lines += ["## 标签索引", ""]
+        for t in sorted(tag_map, key=lambda k: (-len(tag_map[k]), k)):
+            links = ", ".join(f"[{Path(p).stem}]({_rel_link(p)})" for p in tag_map[t])
+            lines.append(f"- **{t}** ({len(tag_map[t])}): {links}")
         lines.append("")
     write_file(DOCS_ROOT / "README.md", "\n".join(lines))
 
@@ -430,11 +853,12 @@ async def list_tools() -> list[Tool]:
     return [
         # ── 原文档工具 ──
         Tool(name="query_docs",
-             description="查询项目文档。根据关键词搜索 docs/junsi-dev-docs/ 下的所有文档，返回匹配的文档摘要和路径。",
+             description="查询项目文档。按关键词/tag 搜索 docs/ 下所有文档（含已归档文档），返回路径、标签和摘要。keywords 与 tags 至少给一个。",
              inputSchema={"type": "object","properties": {
-                 "keywords": {"type": "string", "description": "搜索关键词，如 'API规范'、'架构设计'"},
-                 "category": {"type": "string", "enum": list(CATEGORIES.keys()), "description": "限定文档分类（可选）"}
-             }, "required": ["keywords"]}),
+                 "keywords": {"type": "string", "description": "搜索关键词（AND 匹配），逗号分隔，可选"},
+                 "category": {"type": "string", "enum": list(CATEGORIES.keys()), "description": "限定 toolkit 分类（可选）"},
+                 "tags": {"type": "array", "items": {"type": "string"}, "description": "按标签过滤（AND，需全部命中），可选"}
+             }}),
         Tool(name="create_adr",
              description="创建新的架构决策记录（ADR）。自动编号。",
              inputSchema={"type": "object","properties": {
@@ -451,9 +875,40 @@ async def list_tools() -> list[Tool]:
                  "change_description": {"type": "string", "description": "变更说明"}
              }, "required": ["doc_path","content","change_description"]}),
         Tool(name="organize_docs",
-             description="整理项目文档。扫描并移动散落的文档到 docs/junsi-dev-docs/ 对应目录。",
+             description="扫描散落文档（docs/**、项目根 *.md、roots 指定目录）并归档到 docs/junsi-dev-docs/ 的 9 大分类。默认 dry_run=true 仅预览；需传 assignments 显式指定 path→分类并 dry_run=false 才真正移动。原位置写入索引并转为标签，可用 revert_docs 回滚。",
              inputSchema={"type": "object","properties": {
-                 "dry_run": {"type": "boolean", "description": "仅模拟运行", "default": False}
+                 "dry_run": {"type": "boolean", "description": "仅预览不移动，默认 true", "default": True},
+                 "assignments": {"type": "array", "description": "显式分类：[{path, category}]，path 相对项目根",
+                     "items": {"type": "object","properties": {
+                         "path": {"type": "string"},
+                         "category": {"type": "string", "enum": list(CATEGORIES.keys())}}}},
+                 "roots": {"type": "array", "items": {"type": "string"}, "description": "额外扫描目录（项目相对路径），可选"},
+                 "include_root": {"type": "boolean", "description": "是否扫描项目根 *.md，默认 true", "default": True}
+             }}),
+        Tool(name="revert_docs",
+             description="将已归档文档按索引中的 original_path 回滚到原位置。默认 dry_run=true。",
+             inputSchema={"type": "object","properties": {
+                 "dry_run": {"type": "boolean", "default": True},
+                 "paths": {"type": "array", "items": {"type": "string"}, "description": "仅回滚指定文档（归档路径或原路径），可选"}
+             }}),
+        Tool(name="index_docs",
+             description="扫描并登记 docs/（含项目根）下所有文档到 docs/junsi-dev-docs/docs-index.json，不移动文件。i18n 三件套(.md/.zh.md/.i18n.yaml)合并为一个文档单元。",
+             inputSchema={"type": "object","properties": {
+                 "dry_run": {"type": "boolean", "default": False},
+                 "roots": {"type": "array", "items": {"type": "string"}},
+                 "include_root": {"type": "boolean", "default": True}
+             }}),
+        Tool(name="tag_docs",
+             description="给文档追加/移除/设置显式标签（写入索引，不改动文档文件）。路径相对项目根，可写 docs/xxx 或 xxx。",
+             inputSchema={"type": "object","properties": {
+                 "paths": {"type": "array", "items": {"type": "string"}},
+                 "tags": {"type": "array", "items": {"type": "string"}},
+                 "mode": {"type": "string", "enum": ["add", "remove", "set"], "default": "add"}
+             }, "required": ["paths","tags"]}),
+        Tool(name="list_tags",
+             description="列出索引中的所有标签及文档数；给 tag 参数则列出该标签下的文档。",
+             inputSchema={"type": "object","properties": {
+                 "tag": {"type": "string", "description": "查看单个标签的文档列表（可选）"}
              }}),
         Tool(name="generate_docs",
              description="生成项目文档。支持任意类型的专题文档。",
@@ -519,7 +974,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     # ── 原文档工具 ──
     if name == "query_docs":
-        r = search_docs(arguments.get("keywords",""), arguments.get("category"))
+        r = search_docs(arguments.get("keywords",""), arguments.get("category"),
+                        arguments.get("tags"))
         result = json.dumps(r, ensure_ascii=False, indent=2) if r else "📭 未找到匹配文档"
     elif name == "create_adr":
         result = create_adr_file(
@@ -537,15 +993,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # 自动创建
             result = f"✅ 已创建：`{safe_relative(dp, DOCS_ROOT)}`\n变更：{desc}" if write_file(dp, content) else "❌ 创建失败"
     elif name == "organize_docs":
-        dry = arguments.get("dry_run", False)
-        lines = ["📂 文档整理扫描结果："]
-        docs_root = PROJECT_ROOT / "docs"
-        if docs_root.exists():
-            for f in docs_root.glob("*.md"):
-                if "junsi-dev-docs" not in str(f):
-                    lines.append(f"  发现：`{f.name}` → 建议移动到 docs/junsi-dev-docs/ 下")
-        result = "\n".join(lines) if lines else "没有散落文档。"
-        if dry: result += "\n\n（仅模拟，未移动）"
+        result = run_organize(arguments.get("dry_run", True),
+                              arguments.get("assignments"),
+                              arguments.get("roots"),
+                              arguments.get("include_root", True))
+    elif name == "revert_docs":
+        result = run_revert(arguments.get("dry_run", True), arguments.get("paths"))
+    elif name == "index_docs":
+        result = run_index_docs(arguments.get("dry_run", False),
+                                arguments.get("roots"),
+                                arguments.get("include_root", True))
+    elif name == "tag_docs":
+        result = run_tag_docs(arguments.get("paths"), arguments.get("tags"),
+                              arguments.get("mode", "add"))
+    elif name == "list_tags":
+        result = run_list_tags(arguments.get("tag"))
     elif name == "generate_docs":
         doc_type = arguments.get("doc_type","")
         content = arguments.get("content","")

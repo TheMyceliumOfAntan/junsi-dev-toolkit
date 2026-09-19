@@ -28,3 +28,18 @@ docs/junsi-dev-docs/
 - 更新文档：`update_doc(doc_path, content, change_description)`
 - 整理文档：`organize_docs()`
 - 生成文档：`generate_docs(doc_types=[...])`
+
+
+### 2026-09-19 更新
+## 归档与标签（archive + tag）
+
+新增工具（处理已按自定义目录整理的文档树，如 `docs/cookbook/`、`docs/subsystems/`）：
+
+- 原地登记索引：`index_docs(dry_run=false)` — 扫描 `docs/**` 与项目根，登记到 `docs/junsi-dev-docs/docs-index.json`，不移动文件
+- 归档整理：`organize_docs(assignments=[{path,category}], dry_run=false)` — 按 9 大分类归档，原路径写入索引并转为 tag；默认 `dry_run=true` 仅预览
+- 打标签：`tag_docs(paths, tags, mode="add|remove|set")` — 写入索引，不改动文档文件
+- 查标签：`list_tags(tag)`
+- 回滚：`revert_docs(dry_run=false)` — 按 `original_path` 把文档移回原位
+- 按标签检索：`query_docs(tags=["cookbook","core"])` — tag 为 AND 匹配，跨全 `docs/` 检索
+
+标签来源 = 原路径目录段（自动派生）+ `explicit_tags`（手动叠加）。
