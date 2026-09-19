@@ -43,3 +43,16 @@ docs/junsi-dev-docs/
 - 按标签检索：`query_docs(tags=["cookbook","core"])` — tag 为 AND 匹配，跨全 `docs/` 检索
 
 标签来源 = 原路径目录段（自动派生）+ `explicit_tags`（手动叠加）。
+
+
+### 2026-09-19 更新
+## 补充：无法归档的外部文档（paths[]）
+
+部分文档树被生成器/i18n 门禁/路由表/相对链接强绑定，物理移动会拆链，属于「无法归档」。这类文档登记进 `docs-index.json` 的 `paths[{id?, path}]` 就地接入，**不移动**：
+
+- `index_docs(paths=["docs"])` 登记外部路径并重建索引；外部文档自动分配 `id`
+- `organize_docs` 归档时**跳过** paths[] 登记的文档（受保护，绝不移动）
+- `tag_docs(ids=[...], tags=[...])` 给外部文档打标签
+- `query_docs(tags=[...])` / `list_tags` 跨内外检索（tags AND）
+
+归档（`organize_docs` → junsi-dev-docs 9 分类，含 `original_path` 标签与 `revert_docs` 回滚）与外部接入（`paths[]`）并存，互不影响。
