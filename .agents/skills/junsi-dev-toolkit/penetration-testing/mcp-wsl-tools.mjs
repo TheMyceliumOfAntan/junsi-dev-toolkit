@@ -16,7 +16,7 @@
 import { execFile } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
-const SERVER_INFO = { name: 'wsl-pentest', version: '1.1.0' };
+const SERVER_INFO = { name: 'wsl-pentest', version: '1.2.0' };
 const PROTOCOL_VERSION = '2024-11-05';
 
 function send(msg) {
@@ -221,6 +221,121 @@ const TOOLS = [
       const r = await runWsl(command, 300000);
       if (r.ok) return JSON.stringify({ success: true, target, command, output: r.output });
       return fail({ target }, r);
+    },
+  },
+  {
+    name: 'wsl-curl',
+    description: '主力 HTTP 请求工具：认证、授权、会话、CSRF 等手工测试。返回状态码、响应头与响应体（超长截断）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '目标 URL' },
+        method: { type: 'string', description: 'HTTP 方法，默认 GET', default: 'GET' },
+        data: { type: 'string', description: '请求体（原始字符串，form 或 JSON）' },
+        headers: { type: 'string', description: '追加请求头，多条用换行分隔，如 "Cookie: session=x\\nX-Test: 1"' },
+        cookie: { type: 'string', description: 'Cookie 字符串（等价于 -b）' },
+        timeout: { type: 'number', description: '超时毫秒，默认 30000', default: 30000 },
+      },
+      required: ['url'],
+    },
+    async call(params) {
+      const { url, method = 'GET', data, headers, cookie } = params;
+      const timeout = Number(params.timeout) || 30000;
+      if (!url) return JSON.stringify({ success: false, error: '请提供目标 URL' });
+      let command = `curl -sS -i --max-time ${Math.ceil(timeout / 1000)} -X ${method} -w '\\n__STATUS__:%{http_code}'`;
+      if (cookie) command += ` -b ${JSON.stringify(String(cookie))}`;
+      if (headers) {
+        for (const line of String(headers).split('\n')) {
+          const h = line.trim();
+          if (h) command += ` -H ${JSON.stringify(h)}`;
+        }
+      }
+      if (data) command += ` --data-binary ${JSON.stringify(String(data))}`;
+      command += ` ${JSON.stringify(String(url))}`;
+      const r = await runWsl(command, timeout + 5000);
+      if (r.ok) {
+        let out = r.output;
+        let status = null;
+        const m = out.match(/__STATUS__:(\d{3})\s*$/);
+        if (m) {
+          status = Number(m[1]);
+          out = out.slice(0, m.index);
+        }
+        if (out.length > 20000) out = out.slice(0, 20000) + '\n...(output truncated)';
+        return JSON.stringify({ success: true, url, method, status, command, output: out.trim() });
+      }
+      return fail({ url, command }, { ...r, output: String(r.output || '').replace(/__STATUS__:\d{3}\s*$/, '').trim() });
+    },
+  },
+  {
+    name: 'wsl-hydra',
+    description: '使用 hydra 暴力破解（认证测试用）。仅授权目标，确认无锁定机制后使用；-f 命中即停、线程固定 4。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: '目标域名或 IP' },
+        service: { type: 'string', description: 'hydra 服务模块，如 ssh、http-post-form、http-get、ftp', default: 'ssh' },
+        user: { type: 'string', description: '登录用户名（-l）或用户名字典路径（-L），默认 root', default: 'root' },
+        passFile: { type: 'string', description: '密码字典路径，默认 rockyou（若存在）', default: '/usr/share/wordlists/rockyou.txt' },
+        extra: { type: 'string', description: '追加 hydra 原生参数，如 http-post-form 表达式 "-f -e nsr"' },
+        timeout: { type: 'number', description: '超时毫秒，默认 300000', default: 300000 },
+      },
+      required: ['target'],
+    },
+    async call(params) {
+      const { target, service = 'ssh', user = 'root', passFile = '/usr/share/wordlists/rockyou.txt', extra = '' } = params;
+      if (!target) return JSON.stringify({ success: false, error: '请提供目标' });
+      const timeout = Number(params.timeout) || 300000;
+      const command = `hydra -l ${user} -P ${passFile} -t 4 -f ${extra ? extra + ' ' : ''}${target} ${service}`;
+      const r = await runWsl(command, timeout);
+      if (r.ok) {
+        const found = /login:\s*\S+\s+password:\s*\S+/i.test(r.output) || r.output.includes('1 valid password');
+        return JSON.stringify({ success: true, target, service, command, credentialsFound: found, output: r.output.slice(-4000) });
+      }
+      return fail({ target, command }, { ...r, output: (r.output || '').slice(-2000), stderr: (r.stderr || '').slice(-2000) });
+    },
+  },
+  {
+    name: 'wsl-httpx',
+    description: 'HTTP 存活探测（状态码/标题/技术指纹）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        target: { type: 'string', description: 'URL、域名或换行分隔的目标列表' },
+        timeout: { type: 'number', description: '超时毫秒，默认 60000', default: 60000 },
+      },
+      required: ['target'],
+    },
+    async call(params) {
+      const target = params.target;
+      if (!target) return JSON.stringify({ success: false, error: '请提供目标' });
+      const timeout = Number(params.timeout) || 60000;
+      const command = `echo ${JSON.stringify(String(target))} | httpx -silent -status-code -title -tech-detect`;
+      const r = await runWsl(command, timeout);
+      if (r.ok) return JSON.stringify({ success: true, command, output: r.output });
+      return fail({ command }, r);
+    },
+  },
+  {
+    name: 'wsl-dirsearch',
+    description: '目录/敏感文件扫描（备份、配置、源码映射等泄漏文件）。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '目标 URL，例如: "http://target.com"' },
+        extensions: { type: 'string', description: '扫描扩展名，逗号分隔', default: 'bak,old,orig,save,swp,sql,zip,log,env,map' },
+        timeout: { type: 'number', description: '超时毫秒，默认 180000', default: 180000 },
+      },
+      required: ['url'],
+    },
+    async call(params) {
+      const { url, extensions = 'bak,old,orig,save,swp,sql,zip,log,env,map' } = params;
+      if (!url) return JSON.stringify({ success: false, error: '请提供目标 URL' });
+      const timeout = Number(params.timeout) || 180000;
+      const command = `dirsearch -u ${JSON.stringify(String(url))} -e ${extensions} --format plain`;
+      const r = await runWsl(command, timeout);
+      if (r.ok) return JSON.stringify({ success: true, url, command, output: r.output.slice(-6000) });
+      return fail({ url, command }, { ...r, output: (r.output || '').slice(-2000), stderr: (r.stderr || '').slice(-2000) });
     },
   },
 ];

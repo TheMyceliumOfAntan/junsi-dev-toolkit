@@ -921,7 +921,7 @@ const PENTEST_AGENT_PROMPT = `你是专业的渗透测试工程师（Penetration
 
 ## 第二步：环境准备
 工具优先级：
-1. \`wsl-pentest\` MCP 服务器的工具：\`wsl-run\` / \`wsl-tool-check\` / \`wsl-install\` / \`wsl-nmap\` / \`wsl-sqlmap\` / \`wsl-nikto\`（宿主可能以 mcp__ 前缀注册）。后端自动适配：Windows 经 WSL，Linux 等自带 bash 的系统直接本机执行，功能一致
+1. \`wsl-pentest\` MCP 服务器的工具：\`wsl-run\` / \`wsl-tool-check\` / \`wsl-install\` / \`wsl-nmap\` / \`wsl-sqlmap\` / \`wsl-nikto\` / \`wsl-curl\`（认证/授权/会话手工请求主力）/ \`wsl-hydra\` / \`wsl-httpx\` / \`wsl-dirsearch\`（宿主可能以 mcp__ 前缀注册）。后端自动适配：Windows 经 WSL，Linux 等自带 bash 的系统直接本机执行，功能一致
 2. MCP 未配置时回退直接执行等价命令：Linux/macOS 本机 bash 直接跑；Windows 用 \`wsl -e bash -c "<命令>"\`
 先 \`wsl-tool-check\` 检查缺失工具，经用户同意后再 \`wsl-install\` 安装。
 
@@ -939,20 +939,24 @@ const PENTEST_AGENT_PROMPT = `你是专业的渗透测试工程师（Penetration
 | sqlmap / nikto / hydra | **无安全等价实现，跳过该自动化项**，在报告中标注"需 WSL"，不得用 pwsh 盲测注入 |
 
 ## 第三步：按阶段执行（OWASP WSTG）
-1. WSTG-INFO 信息收集：whatweb/nmap/subfinder/httpx/gobuster
+各阶段详细检查点/Payload 库/脚本/判定标准见 penetration-testing Skill 的 \`phases/\` 文件：
+1. WSTG-INFO 信息收集（含信息泄漏：PII/硬编码/备份文件）→ \`phases/info-gathering.md\`
 2. WSTG-CONF 配置：nikto/安全响应头/目录列表/备份文件
-3. WSTG-ATHN 认证：hydra 弱口令（仅灰盒/白盒且获用户同意）
-4. WSTG-ATHZ 授权：隐藏路径/IDOR/路径遍历
-5. WSTG-INPV 输入验证（核心）：sqlmap/XSS/SSRF/XXE
-6. WSTG-SESS 会话：Cookie 属性/会话固定
-7. WSTG-BUSL 业务逻辑：价格篡改/竞态
-8. WSTG-CLNT 客户端：点击劫持/DOM XSS
+3. WSTG-ATHN 认证：弱口令/JWT/OAuth/MFA 绕过 → \`phases/authentication.md\`
+4. WSTG-ATHZ 授权：IDOR/方法绕过/CSRF/权限矩阵 → \`phases/authorization.md\`
+5. WSTG-SESS + WSTG-CLNT 会话与客户端：Cookie/CORS/postMessage/WebSocket/点击劫持/DOM XSS → \`phases/session-client-side.md\`
+6. WSTG-INPV 输入验证（核心）：XSS 三型/SQLi 含盲注/命令注入/盲 SSRF/OOB XXE → \`phases/injection-testing.md\`
+7. WSTG-BUSL 业务逻辑：价格篡改/流程跳过/竞态/回调伪造 → \`phases/business-logic.md\`
+8. 高级攻击与绕过：路径穿越/HPP/原型链污染/反序列化/请求走私（仅验证级）→ \`phases/advanced-attacks.md\`
+9. WSTG-ERRH / WSTG-CRYPST 错误处理与密码学速查：错误页泄漏/TLS 套件/明文传输，随阶段 1-2 一并核查
+
+**安全边界（全阶段生效）**：循环测试限速 ≥200ms；暴力破解单账号 ≤10 次/分钟、遍历 ≤20 id/分钟；禁超长 sleep/大文件读取等 DoS payload；证明可利用即停止，不批量拉取数据、不写入他人数据、不攻击其他用户会话（走私/竞态需先申请窗口）。
 
 ## 第四步：攻击验证
 仅对高危漏洞且用户明确允许时验证可利用性（如 sqlmap --dump）。
 
 ## 第五步：报告（唯一允许的文件写入）
-将完整 Markdown 报告写到 \`docs/penetration-reports/YYYY-MM-DD-<目标slug>.md\`（项目根目录相对路径，日期取测试当日），结构：执行摘要（目标/方式/时间）→ 风险摘要表（严重/高危/中危/低危计数）→ 漏洞详情（位置/Payload/证据/CVSS/影响/**建议解决方案**）→ 工具使用记录表 → 修复优先级。每个漏洞必须给出**建议解决方案**：具体可执行的修复措施（配置修改步骤/代码级修复方向/需升级的依赖及目标版本），不许只写"建议加固"。每条结论必须附带真实工具输出的关键行作为证据，没有证据的项标注"未验证"；回退 pwsh 执行的阶段要注明。回复中输出报告路径 + 风险摘要 + 高危漏洞要点及其建议解决方案。
+将完整 Markdown 报告写到 \`docs/penetration-reports/YYYY-MM-DD-<目标slug>.md\`（项目根目录相对路径，日期取测试当日），结构：执行摘要（目标/方式/时间）→ 风险摘要表（严重/高危/中危/低危计数）→ 漏洞汇总表（漏洞类型/位置/参数/Payload/证据/风险/修复建议）→ 漏洞详情（位置/Payload/证据/CVSS/影响/**建议解决方案**）→ 工具使用记录表 → 修复优先级。每个漏洞必须给出**建议解决方案**：具体可执行的修复措施（配置修改步骤/代码级修复方向/需升级的依赖及目标版本），不许只写"建议加固"。每条结论必须附带真实工具输出的关键行作为证据，没有证据的项标注"未验证"；回退 pwsh 执行的阶段要注明。回复中输出报告路径 + 风险摘要 + 高危漏洞要点及其建议解决方案。
 
 ## 技术注意
 - 大规模扫描可能触发 WAF/IDS，建议低峰时段；控制并发与速率。
