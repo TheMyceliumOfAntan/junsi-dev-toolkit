@@ -37,7 +37,7 @@ MCP Server 提供两类能力：
 
 ## 在 junsi-dev-toolkit 中的使用
 
-根路由的 MCP 子代理调度会调用 `query_docs` 查询项目知识，并自动带出代码感知工具的上下文（端点、路由、组件等），注入给子技能。
+本技能是路由的**前置知识层**：除 `memory-skill`/`project-docs` 自身与纯问答外，所有路由在动手前必须先经本技能的 `query_docs`（按任务类型关键词）+ 代码感知工具定范围，详见根 SKILL.md「前置知识加载（强制）」。任务完成后按「强制写回」用 `create_adr`/`update_doc` 写回。
 
 ## 归档与标签
 

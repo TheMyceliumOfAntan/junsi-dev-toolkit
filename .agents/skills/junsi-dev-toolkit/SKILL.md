@@ -52,8 +52,8 @@ Tab 切换到 `goal` agent：按 **GOAL_LIST.MD 标准格式**建立目标清单
 ## 工作流
 
 ```
-HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → MCP定范围(直接调MCP工具)
-  → 读子技能SKILL.md → 执行 → 更新文档 → 保存进度
+HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → 【前置知识加载(强制)】
+  → 读子技能SKILL.md → 执行 → 强制写回 → 保存进度
 ```
 
 - **远程更新预检（各子技能必备前置）**：动手前先 `git fetch` + 查远程分支 `git log`/近期提交/`CHANGELOG`/`Release Notes`（可 `web_search` 查上游 issue/PR/发布说明），确认用户提出的问题/需求是否已被上游最新版实现或修复。**若已实现/已修复** → 提示用户"上游已提供（版本/提交 X），建议升级/改用/拉新"，给出依据，不重复实现/修复；仅当升级不适用时再自研。加功能（`requirements-driven-dev`）、修 Bug（`diagnose-before-fix`）、移植（`code-migrater`）三个子技能都把此项列为前置 Gate 0。
@@ -61,29 +61,51 @@ HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → MCP定�
 - 降智/上下文将满 → 生成 HANDOFF（调 `prepare-handoff` 工具）→ 提示开新会话。
 - 上下文压缩时插件自动注入 `.memory` 摘要。
 
-## MCP 定范围
+## 前置知识加载（强制，先于一切调查）
 
-路由前直接调 MCP 工具定位范围（不用 task() 子代理）：
+**时序硬约束**：路由宣告之后、任何项目调查之前，必须先用 project-docs 工具加载前置知识。**在完成本节加载之前，禁止用 glob/grep/read/bash 等方式扫描或阅读项目文件**——一次前置加载的开销远小于重新调查（省几倍到几十倍 token），调查需求绝大多数已被文档与代码感知工具覆盖。
 
-| 路由 | MCP 工具 |
-|------|---------|
+**第一步：`query_docs` 按任务类型查文档知识（强制，`memory-skill`/`project-docs`/纯问答除外）：**
+
+| 任务类型 | query_docs 关键词 |
+|---------|------------------|
+| 移植 | 架构设计,编码规范,技术选型 |
+| 修复 Bug | API规范,调用规范,错误码 |
+| 新功能/重构 | 模块划分,API规范,UI/组件设计 |
+| 渗透测试 | 调用规范,部署运维 |
+| 集群/Goal | 免查，按各自流程 |
+
+**第二步：代码感知定范围（按路由选用）：**
+
+| 路由 | project-docs 工具 |
+|------|------------------|
 | `code-migrater` | `project_tree` + `project_config` + `code_context`(关键文件) |
 | `diagnose-before-fix` | `project_tree` + 按报错位置选 `api_endpoints`/`frontend_routes`/`tauri_commands`/`hooks`/`stores` |
 | `requirements-driven-dev` | `project_tree` + `project_config` + `api_endpoints` + `frontend_routes` + `component_inventory` |
 
-`memory-skill` 和 `project-docs` 不需要定范围。MCP 不可用时提示后继续。
-
-输出范围定义：
+加载后输出范围定义：
 ```
-📌 范围
+📌 前置知识
+- 文档：{query_docs 命中的文档与关键约束摘要}
 - 目录：{path1}, {path2}
-- 端点：{GET /api/xxx}
-- 组件：{ComponentA}
-- 文件：{file1.tsx, file2.cs}
-- 约束：{关键约束}
+- 端点/组件/文件：{定范围结果}
 ```
 
-子技能和子代理**只在范围内精细解析**，不扫全文。
+**注入合同**：查询结果作为本任务的上下文约束，后续调查与实现只在范围内精细解析、遵守文档约束，不再重复调查。
+
+MCP/project-docs 工具不可用时：提示用户后继续（此时才允许退回直接调查），不阻塞任务。
+
+## 强制写回（任务完成后）
+
+涉及以下变更时，**必须**用 project-docs 写回文档，缺一项不得宣称完成：
+
+| 任务类型 | 调用 | 写什么 |
+|---------|------|--------|
+| 架构/技术选型决策 | `create_adr` | 新增 ADR |
+| API/模块/UI 变更 | `update_doc` | 更新对应规范文档 |
+| 构建命令/依赖变更 | 手工更新 `AGENTS.md` | 命令与依赖清单 |
+
+禁止自己另起炉灶乱写文档；写回完成才算任务闭环。
 
 ## Memory 工具（插件注册，直接调用）
 
@@ -106,7 +128,7 @@ HANDOFF恢复(自动) → 路由宣告 → 【远程更新预检】 → MCP定�
 
 ## 文档强制规则
 
-涉及 API、架构、UI、行为变更 → **必须**调用 project-docs 的 `update_doc`/`create_adr`，禁止自己乱写文档。各子技能完成清单已含此强制项，缺一项不得宣称完成。
+前置加载与写回的完整合同见上文「前置知识加载（强制）」与「强制写回」两节。要点：动手前必查（query_docs + 定范围），完成后必写（update_doc/create_adr），缺任一项不得宣称完成。
 
 ## 子技能文件（路由后读取详细步骤）
 
