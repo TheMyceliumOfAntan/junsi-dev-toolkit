@@ -1903,9 +1903,25 @@ const parseFrontmatter = (text) => {
   const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (!match) return { data: {}, body: text };
   const data = {};
-  for (const line of match[1].split(/\r?\n/)) {
-    const mm = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
-    if (mm) data[mm[1]] = mm[2].trim().replace(/^["']|["']$/g, '');
+  const lines = match[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const mm = lines[i].match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (!mm) continue;
+    const key = mm[1];
+    let value = mm[2].trim();
+    if (/^[>|][+-]?$/.test(value)) {
+      // YAML 块标量：> 折叠（空格连接），| 保留换行
+      const folded = value[0] === '>';
+      const parts = [];
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) {
+        i += 1;
+        parts.push(lines[i].replace(/^\s+/, ''));
+      }
+      value = folded ? parts.join(' ') : parts.join('\n');
+    } else {
+      value = value.replace(/^["']|["']$/g, '');
+    }
+    data[key] = value;
   }
   return { data, body: match[2] };
 };
