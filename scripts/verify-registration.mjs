@@ -1,9 +1,10 @@
 /**
- * 深度注册验证：真实加载插件，断言全部工具注册 + memory-doctor 冒烟。
+ * 深度注册验证（OpenCode V2）：真实加载插件定义，用 mock ctx 触发 setup，
+ * 断言全部工具/子技能/Agent 注册，并冒烟 memory-doctor 与路由/压缩注入。
  * 由 verify-install.ps1（-Full）调用。
  *
  * 用法: node verify-registration.mjs <pkgDir> <projectDir>
- * 前置：pkgDir/node_modules/@opencode-ai 已指向可用安装（junction）。
+ * 前置：pkgDir/node_modules/@opencode 已指向可用安装（junction）。
  */
 import fs from 'fs';
 import path from 'path';
@@ -19,6 +20,7 @@ const fail = (msg) => {
   console.log(`  [FAIL] ${msg}`);
   process.exitCode = 1;
 };
+const pass = (msg) => console.log(`  [PASS] ${msg}`);
 
 const pluginFile = path.join(pkgDir, '.opencode/plugins/junsi-dev-toolkit.js');
 if (!fs.existsSync(pluginFile)) {
@@ -26,7 +28,7 @@ if (!fs.existsSync(pluginFile)) {
   process.exit(1);
 }
 
-const expected = [
+const expectedTools = [
   'store-decision', 'save-progress', 'prepare-handoff', 'restore-handoff',
   'list-decisions', 'memory-doctor', 'save-preference',
   'cluster-task-prompt', 'cluster-scan-models', 'cluster-allocation',
@@ -34,42 +36,175 @@ const expected = [
   'tool-search', 'cron-create',
 ];
 
-let JunsiDevToolkitPlugin;
+let def;
+const dir = path.dirname(pluginFile);
+const isEsm = (file) => {
+  let d = path.dirname(file);
+  for (;;) {
+    const pj = path.join(d, 'package.json');
+    if (fs.existsSync(pj)) {
+      try {
+        const t = JSON.parse(fs.readFileSync(pj, 'utf8')).type;
+        if (t === 'module') return true;
+      } catch {
+        /* ignore */
+      }
+      return false;
+    }
+    const parent = path.dirname(d);
+    if (parent === d) return false;
+    d = parent;
+  }
+};
+const tmpPlugin = path.join(dir, `.verify-${process.pid}.mjs`);
+const loadedFrom = pluginFile.endsWith('.js') && !isEsm(pluginFile) ? tmpPlugin : pluginFile;
 try {
-  ({ JunsiDevToolkitPlugin } = await import(pathToFileURL(pluginFile).href));
+  if (loadedFrom !== pluginFile) fs.copyFileSync(pluginFile, loadedFrom);
+  const mod = await import(pathToFileURL(loadedFrom).href);
+  def = mod.default;
 } catch (e) {
-  fail(`插件加载失败: ${e.message}`);
+  fail(`插件加载失败: ${e && e.message ? e.message : e}`);
+  process.exit(1);
+} finally {
+  if (loadedFrom !== pluginFile) fs.rmSync(loadedFrom, { force: true });
+}
+
+if (!def || def.id !== 'junsi-dev-toolkit' || typeof def.setup !== 'function') {
+  fail('默认导出不是合法的 V2 插件定义（需 Plugin.define({ id, setup })）');
   process.exit(1);
 }
+pass(`插件定义合法 (id=${def.id})`);
 
-const client = { app: { log: () => {} } };
+// ---------- mock OpenCode V2 ctx ----------
+const tools = [];
+const skills = [];
+const agents = [];
+const hooks = new Map();
+
+const makeTransform = (sink) => async (cb) => {
+  const editor = {
+    add: (item) => sink.push(item),
+    get: () => undefined,
+    update: () => {},
+    remove: () => {},
+    list: () => [],
+    namespace: () => {},
+    default: () => {},
+  };
+  await cb(editor);
+  return { dispose: async () => {} };
+};
+
 fs.mkdirSync(projectDir, { recursive: true });
-const instance = await JunsiDevToolkitPlugin({ client, directory: projectDir });
-const registered = Object.keys(instance.tool || {});
 
-const missing = expected.filter((t) => !registered.includes(t));
-if (missing.length) {
-  fail(`工具未注册: ${missing.join(', ')}`);
-} else {
-  console.log(`  [PASS] 工具注册完整 (${registered.length} 个: ${expected.join(', ')})`);
-}
-
-for (const t of expected) {
-  if (!registered.includes(t)) continue;
-  if (instance.tool[t] && typeof instance.tool[t].execute !== 'function') {
-    fail(`工具 ${t} 缺少 execute`);
-  }
-}
+const ctx = {
+  location: { directory: projectDir, project: { id: 'verify', directory: projectDir, canonical: projectDir } },
+  app: {},
+  options: {},
+  agent: {
+    list: async () => ({ data: [] }),
+    transform: async (cb) => {
+      const editor = {
+        list: () => [],
+        get: () => undefined,
+        default: () => {},
+        update: (id, up) => {
+          const agent = { id, request: { settings: {}, headers: {}, body: {} } };
+          up(agent);
+          agents.push(agent);
+        },
+        remove: () => {},
+      };
+      await cb(editor);
+      return { dispose: async () => {} };
+    },
+  },
+  tool: { transform: makeTransform(tools) },
+  skill: { transform: makeTransform(skills) },
+  session: {
+    hook: async (name, cb) => {
+      hooks.set(name, cb);
+      return { dispose: async () => {} };
+    },
+    get: async () => ({ agent: '' }),
+    prompt: async () => {},
+  },
+  event: { subscribe: () => (async function* () {})() },
+};
 
 try {
-  const doc = await instance.tool['memory-doctor'].execute({}, { directory: projectDir });
-  if (String(doc).includes('memory 健康审计')) {
-    console.log('  [PASS] memory-doctor 冒烟执行');
-  } else {
-    fail('memory-doctor 输出异常');
-  }
+  await def.setup(ctx);
 } catch (e) {
-  fail(`memory-doctor 冒烟失败: ${e.message}`);
+  fail(`setup 执行失败: ${e && e.stack ? e.stack : e}`);
+  process.exit(1);
+}
+pass('setup 执行完成');
+
+// ---------- tools ----------
+const toolNames = tools.map((t) => t.name);
+const missing = expectedTools.filter((t) => !toolNames.includes(t));
+if (missing.length) fail(`工具未注册: ${missing.join(', ')}`);
+else pass(`工具注册完整 (${toolNames.length} 个)`);
+
+for (const t of tools) {
+  if (typeof t.execute !== 'function') fail(`工具 ${t.name} 缺少 execute`);
+  if (!t.input || t.input.type !== 'object') fail(`工具 ${t.name} 缺少 JSON Schema input`);
+}
+
+// ---------- skills ----------
+if (skills.length >= 9) pass(`子技能注册 (${skills.length} 个: ${skills.map((s) => s.id).join(', ')})`);
+else fail(`子技能注册不足 (${skills.length} 个，预期 >= 9)`);
+
+// ---------- agents ----------
+const agentIds = agents.map((a) => a.id);
+for (const want of ['cluster', 'penetration', 'goal', 'cluster-planner', 'cluster-backend']) {
+  if (!agentIds.includes(want)) fail(`Agent 未注册: ${want}`);
+}
+if (agentIds.length >= 14) pass(`Agent 注册 (${agentIds.length} 个)`);
+else fail(`Agent 注册不足 (${agentIds.length} 个，预期 >= 14)`);
+
+// ---------- prompt 钩子（路由注入） ----------
+const promptHook = hooks.get('prompt');
+if (!promptHook) {
+  fail('未注册 prompt 钩子');
+} else {
+  const ev = { sessionID: 'verify-session', prompt: { text: '帮我把这个 Java 项目 migrate 到 Go' }, delivery: 'queue' };
+  try {
+    await promptHook(ev);
+    if (String(ev.prompt.text).includes('code-migrater')) pass('prompt 路由注入生效');
+    else fail('prompt 路由注入未生效');
+  } catch (e) {
+    fail(`prompt 钩子执行失败: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// ---------- compaction 钩子（记忆上下文注入） ----------
+const compactionHook = hooks.get('compaction');
+if (!compactionHook) {
+  fail('未注册 compaction 钩子');
+} else {
+  const ev = { sessionID: 'verify-session', system: [] };
+  try {
+    await compactionHook(ev);
+    pass(`compaction 钩子生效 (注入 ${ev.system.length} 段)`);
+  } catch (e) {
+    fail(`compaction 钩子执行失败: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// ---------- memory-doctor 冒烟 ----------
+const doctor = tools.find((t) => t.name === 'memory-doctor');
+if (!doctor) {
+  fail('缺少 memory-doctor');
+} else {
+  try {
+    const out = await doctor.execute({}, { directory: projectDir });
+    const text = typeof out === 'string' ? out : out && out.content ? out.content : String(out);
+    if (String(text).includes('memory 健康审计')) pass('memory-doctor 冒烟执行');
+    else fail('memory-doctor 输出异常');
+  } catch (e) {
+    fail(`memory-doctor 冒烟失败: ${e && e.message ? e.message : e}`);
+  }
 }
 
 console.log(process.exitCode ? '== 深度验证失败 ==' : '== 深度验证通过 ==');

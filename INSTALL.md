@@ -4,7 +4,7 @@
 
 ### 1. 安装插件
 
-`opencode.jsonc` 的 `plugin` 数组添加：
+`opencode.jsonc` 的 `plugins` 数组添加（OpenCode V2 键名，V1 的 `plugin` 不再生效）：
 
 ```json
 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"

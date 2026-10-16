@@ -2,7 +2,7 @@
 
 > 开发任务工具包 — AI 助手自动路由：代码移植、Bug修复、新功能开发、文档管理、任务记忆、Agent 集群、决策顾问、浏览器自动化、渗透测试、目标迭代。
 
-> ⚠️ **本工具包是 OpenCode 插件**，依赖 `@opencode-ai/plugin` 的消息注入与工具注册机制。其他 Agent（Claude Code / Cursor / Codex 等）只能手动复制 `.agents/skills/` 下的子技能文本使用，路由注入 / Memory 工具 / Cluster / Penetration / Goal 模式等宿主能力**未经测试，不保证可用**。
+> ⚠️ **本工具包是 OpenCode V2 插件**（`@opencode/plugin` + `Plugin.define`），依赖宿主的消息注入（`ctx.session.hook`）、工具/技能/Agent 注册（`ctx.tool/skill/agent.transform`）与事件订阅（`ctx.event.subscribe`）机制。配置键为 `plugins`（V2 应用 `plugins`，V1 的 `plugin` 已失效）。其他 Agent（Claude Code / Cursor / Codex 等）只能手动复制 `.agents/skills/` 下的子技能文本使用，路由注入 / Memory 工具 / Cluster / Penetration / Goal 模式等宿主能力**未经测试，不保证可用**。
 
 ## v3.4 核心能力
 
@@ -83,7 +83,7 @@ Tab 切换到 `goal` agent：说清目标 → 按模板问卷澄清 → `goal-se
 
 ## 安装（OpenCode）
 
-在 `opencode.jsonc` 的 `plugin` 数组添加：
+在 `opencode.jsonc` 的 `plugins` 数组添加（OpenCode V2 把 `plugin` 改名为 `plugins`）：
 
 ```json
 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"
@@ -104,9 +104,9 @@ MCP Server 配置见 [INSTALL.md](INSTALL.md)。
 把下面这段 prompt 原样发给任意 AI 助手（opencode / Claude Code / Cursor / Codex），让它自动完成安装与校验：
 
 ````text
-你是安装助手。请在本机自动安装/升级 junsi-dev-toolkit（v3.3）：
+你是安装助手。请在本机自动安装/升级 junsi-dev-toolkit（OpenCode V2）：
 1. 定位 OpenCode 配置文件（全局 ~/.config/opencode/ 或项目根目录下的 opencode.json / opencode.jsonc）
-2. 检查 plugin 数组中是否已包含 "junsi-dev-toolkit"；未包含则在末尾追加 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"（本地克隆存在时用绝对路径代替）
+2. 检查 plugins 数组中是否已包含 "junsi-dev-toolkit"（V2 键名是 plugins，不是 plugin）；未包含则在末尾追加 "junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"（本地克隆存在时用绝对路径代替）
 3.【必装】检查 mcp 中是否已注册 "project-docs" 与 "wsl-pentest"（type=local，enabled=true，command 见 INSTALL.md：project-docs 用 python 跑 mcp-server.py，wsl-pentest 用 node 跑 penetration-testing/mcp-wsl-tools.mjs）；任一缺失则按 INSTALL.md 补齐。project-docs 是文档/代码感知中枢，wsl-pentest 是 Penetration 渗透模式依赖，均不允许跳过（另需确认前置：`pip install mcp pydantic`；Windows+WSL）
 4. 运行 `pwsh scripts/verify-install.ps1 -RepoPath <本仓库路径>` 检验安装副本（任一项 FAIL 说明旧版或损坏）。**升级一律整体重装**：删除旧安装副本（opencode 缓存 packages 目录或 node_modules 下的 junsi-dev-toolkit）后重新完整安装，禁止只改个别文件充当升级；git pull 后同样走删旧重装流程。重跑验证直到全部 PASS
 5. 验证通过后输出摘要（工具数 15、子技能数、仓库 hash 是否一致、project-docs/wsl-pentest MCP 是否已注册），并提醒用户"重启 OpenCode 后生效"

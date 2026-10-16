@@ -2,11 +2,12 @@
 
 ## Installation
 
-Add to `plugin` array in your `opencode.json` (global or project-level):
+Add to `plugins` array in your `opencode.json` (global or project-level).
+OpenCode V2 renamed the `plugin` key to `plugins`:
 
 ```json
 {
-  "plugin": ["junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"]
+  "plugins": ["junsi-dev-toolkit@git+https://github.com/TheMyceliumOfAntan/junsi-dev-toolkit.git"]
 }
 ```
 
@@ -14,7 +15,7 @@ Or use a local path if cloned:
 
 ```json
 {
-  "plugin": ["E:/my-skill"]
+  "plugins": ["E:/my-skill"]
 }
 ```
 

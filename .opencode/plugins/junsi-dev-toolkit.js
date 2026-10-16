@@ -18,6 +18,41 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { fileURLToPath } from 'url';
+import { Plugin } from '@opencode/plugin';
+
+/* ---------- V2 工具定义兼容层（替代 @opencode-ai/plugin 的 tool/schema） ---------- */
+const tool = (def) => def;
+const schemaNode = (node) => {
+  const api = {
+    node,
+    describe(desc) {
+      node.description = desc;
+      return api;
+    },
+    optional() {
+      node.__optional = true;
+      return api;
+    },
+  };
+  return api;
+};
+const schema = {
+  string: () => schemaNode({ type: 'string' }),
+  number: () => schemaNode({ type: 'number' }),
+  boolean: () => schemaNode({ type: 'boolean' }),
+  enum: (values) => schemaNode({ type: 'string', enum: values }),
+};
+const buildInput = (args) => {
+  const properties = {};
+  const required = [];
+  for (const [key, value] of Object.entries(args || {})) {
+    const node = value && value.node ? value.node : value || {};
+    const { __optional, ...rest } = node;
+    properties[key] = rest;
+    if (!__optional) required.push(key);
+  }
+  return { type: 'object', properties, required, additionalProperties: false };
+};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -396,13 +431,6 @@ const archiveHandoff = (mem, prefix = 'handoff-done') => {
 };
 
 const registerMemoryTools = async (tools) => {
-  let tool;
-  try {
-    ({ tool } = await import('@opencode-ai/plugin'));
-  } catch (e) {
-    return { ok: false, error: `@opencode-ai/plugin 不可用，跳过自定义工具: ${e.message}` };
-  }
-  const schema = tool.schema;
 
   tools['store-decision'] = tool({
     description:
@@ -1173,13 +1201,6 @@ const buildClusterAgents = (models, skillsDir) => {
 };
 
 const registerClusterTools = async (tools, skillsDir) => {
-  let tool;
-  try {
-    ({ tool } = await import('@opencode-ai/plugin'));
-  } catch (e) {
-    return { ok: false, error: `@opencode-ai/plugin 不可用，跳过 cluster 工具: ${e.message}` };
-  }
-  const schema = tool.schema;
 
   tools['cluster-task-prompt'] = tool({
     description:
@@ -1386,13 +1407,6 @@ const TOOL_INDEX = [
 ];
 
 const registerUtilityTools = async (tools) => {
-  let tool;
-  try {
-    ({ tool } = await import('@opencode-ai/plugin'));
-  } catch (e) {
-    return { ok: false, error: `@opencode-ai/plugin 不可用，跳过实用工具: ${e.message}` };
-  }
-  const schema = tool.schema;
 
   tools['tool-search'] = tool({
     description: '按关键词在工具索引中模糊检索，返回最合适工具 + 使用时机。当不知道用哪个工具完成任务时调用。',
@@ -1639,13 +1653,6 @@ const parseGoalListFile = (text) => {
 };
 
 const registerGoalTools = async (tools) => {
-  let tool;
-  try {
-    ({ tool } = await import('@opencode-ai/plugin'));
-  } catch (e) {
-    return { ok: false, error: `@opencode-ai/plugin 不可用，跳过 goal 工具: ${e.message}` };
-  }
-  const schema = tool.schema;
 
   tools['goal-set'] = tool({
     description:
@@ -1858,184 +1865,322 @@ const registerGoalTools = async (tools) => {
   return { ok: true };
 };
 
-export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
-  let goalIdleContinueBroken = false;
-  let lastContinueAt = 0;
-  let lastContinueRound = -1;
-  const skillsDir = path.resolve(__dirname, '../../.agents/skills/junsi-dev-toolkit');
-  const tools = {};
-  const toolState = await registerMemoryTools(tools);
-  if (!toolState.ok) {
-    client.app.log({ service: 'junsi-dev-toolkit', level: 'warn', message: toolState.error });
+
+/* ================= OpenCode V2 plugin definition ================= */
+
+const toToolInfo = (name, def, projectDir) => ({
+  name,
+  description: def.description,
+  input: buildInput(def.args),
+  execute: async (input) => {
+    const out = await def.execute(input || {}, { directory: projectDir });
+    if (typeof out === 'string') return { content: out };
+    if (out && typeof out === 'object' && 'content' in out) return out;
+    return { content: String(out ?? '') };
+  },
+});
+
+const walkSkillFiles = (root) => {
+  const out = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name === 'SKILL.md') out.push(full);
+    }
+  };
+  walk(root);
+  return out;
+};
+
+const parseFrontmatter = (text) => {
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { data: {}, body: text };
+  const data = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    const mm = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (mm) data[mm[1]] = mm[2].trim().replace(/^["']|["']$/g, '');
   }
-  const clusterState = await registerClusterTools(tools, skillsDir);
-  if (!clusterState.ok) {
-    client.app.log({ service: 'junsi-dev-toolkit', level: 'warn', message: clusterState.error });
+  return { data, body: match[2] };
+};
+
+const discoverSkills = (skillsDir) =>
+  walkSkillFiles(skillsDir).map((file) => {
+    const { data, body } = parseFrontmatter(readOrEmpty(file));
+    const id = path.basename(path.dirname(file));
+    return {
+      id,
+      name: data.name || id,
+      description: data.description || `junsi-dev-toolkit 子技能：${id}`,
+      path: file,
+      content: body,
+    };
+  });
+
+const buildCompactionContext = (projectDir) => {
+  const parts = ['## junsi-dev-toolkit 记忆上下文'];
+  const up = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+  if (up.trim()) parts.push('', '### 全局用户偏好（跨项目生效）', up.slice(0, MEMORY_LIMITS.compactPreference));
+  const mem = memoryDir(projectDir);
+  if (!fs.existsSync(mem)) return parts.length > 1 ? parts.join('\n') : '';
+  const idx = readOrEmpty(path.join(mem, 'INDEX.md'));
+  if (idx) parts.push('', '### 任务索引', idx.slice(0, MEMORY_LIMITS.compactIndex));
+  const recent = listRecentDecisions(mem, MEMORY_LIMITS.compactDecision);
+  if (recent.length) {
+    const cards = recent
+      .map((f) => {
+        const c = readOrEmpty(path.join(mem, 'decisions', f));
+        return `- **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 6).join('\n')}`;
+      })
+      .join('\n---\n');
+    parts.push('', '### 关键决策画像（最近 ' + recent.length + ' 条，需决策依据时读取全文）', cards);
   }
-  const utilityState = await registerUtilityTools(tools);
-  if (!utilityState.ok) {
-    client.app.log({ service: 'junsi-dev-toolkit', level: 'warn', message: utilityState.error });
+  const gDecDir = path.join(userMemoryDir(), 'decisions');
+  if (fs.existsSync(gDecDir)) {
+    const gRecent = fs.readdirSync(gDecDir).filter((f) => f.endsWith('.md')).sort().reverse().slice(0, MEMORY_LIMITS.compactDecision);
+    if (gRecent.length) {
+      const cards = gRecent
+        .map((f) => {
+          const c = readOrEmpty(path.join(gDecDir, f));
+          return `- 🌐 **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 5).join('\n')}`;
+        })
+        .join('\n---\n');
+      parts.push('', '### 全局决策画像（跨项目，最近 ' + gRecent.length + ' 条）', cards);
+    }
   }
-  const goalState = await registerGoalTools(tools);
-  if (!goalState.ok) {
-    client.app.log({ service: 'junsi-dev-toolkit', level: 'warn', message: goalState.error });
+  const handoff = readOrEmpty(path.join(mem, 'HANDOFF.md'));
+  if (handoff) parts.push('', '### HANDOFF（自包含恢复包，前 ' + MEMORY_LIMITS.compactHandoff + ' 字）', handoff.slice(0, MEMORY_LIMITS.compactHandoff));
+  return parts.join('\n');
+};
+
+const toV2Agent = (id, def) => {
+  const name = id
+    .split('-')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ');
+  const spec = { name, mode: def.mode || 'subagent', hidden: false };
+  if (def.description !== undefined) spec.description = def.description;
+  if (def.prompt !== undefined) spec.system = def.prompt;
+  if (def.model) {
+    const [providerID, ...rest] = String(def.model).split('/');
+    if (providerID && rest.length) spec.model = { providerID, id: rest.join('/') };
   }
+  const perms = [];
+  for (const [action, value] of Object.entries(def.permission || {})) {
+    if (typeof value === 'string') perms.push({ action, resource: '*', effect: value });
+    else if (value && typeof value === 'object') {
+      for (const [resource, effect] of Object.entries(value)) perms.push({ action, resource, effect });
+    }
+  }
+  if (perms.length) spec.permissions = perms;
+  const body = {};
+  if (typeof def.temperature === 'number') body.temperature = def.temperature;
+  if (def.options && typeof def.options === 'object') Object.assign(body, def.options);
+  if (Object.keys(body).length) spec.request = { body };
+  return spec;
+};
 
-  return {
-    config: async (config) => {
-      config.skills = config.skills || {};
-      config.skills.paths = config.skills.paths || [];
-      if (!config.skills.paths.includes(skillsDir)) {
-        config.skills.paths.push(skillsDir);
+const applyAgentSpec = (agent, spec) => {
+  agent.name = spec.name;
+  if (spec.description !== undefined) agent.description = spec.description;
+  agent.mode = spec.mode;
+  agent.hidden = false;
+  if (spec.system !== undefined) agent.system = spec.system;
+  if (spec.model) agent.model = spec.model;
+  if (spec.permissions) agent.permissions = spec.permissions;
+  if (spec.request) {
+    agent.request = agent.request || {};
+    agent.request.body = { ...(agent.request.body || {}), ...spec.request.body };
+  }
+};
+
+const sessionAgentOf = async (ctx, sessionID) => {
+  try {
+    const res = await ctx.session.get({ sessionID });
+    const info = res && res.data ? res.data : res;
+    return (info && info.agent) || '';
+  } catch {
+    return '';
+  }
+};
+
+const jlog = (message, level = 'info') => {
+  try {
+    if (level === 'warn' || level === 'error') console.error(`[junsi-dev-toolkit] ${message}`);
+    else console.log(`[junsi-dev-toolkit] ${message}`);
+  } catch {
+    // 忽略日志失败
+  }
+};
+
+export default Plugin.define({
+  id: 'junsi-dev-toolkit',
+  async setup(ctx) {
+    const projectDir = ctx.location.directory;
+    const skillsDir = path.resolve(__dirname, '../../.agents/skills/junsi-dev-toolkit');
+
+    /* ---- 1. 自定义工具 ---- */
+    const tools = {};
+    await registerMemoryTools(tools);
+    await registerClusterTools(tools, skillsDir);
+    await registerUtilityTools(tools);
+    await registerGoalTools(tools);
+
+    await ctx.tool.transform((editor) => {
+      for (const [name, def] of Object.entries(tools)) {
+        editor.add(toToolInfo(name, def, projectDir));
       }
-      config.agent = config.agent || {};
-      const clusterAgents = buildClusterAgents(scanAvailableModels(), skillsDir);
-      for (const [name, def] of Object.entries(clusterAgents)) {
-        if (!config.agent[name]) {
-          config.agent[name] = def;
-        }
-      }
-    },
+    });
 
-    tool: tools,
-
-    'experimental.chat.messages.transform': async (_input, output) => {
-      if (!output.messages || !output.messages.length) return;
-      const lastUser = getLastUserMessage(output.messages);
-      if (!lastUser || !Array.isArray(lastUser.parts)) return;
-      if (seenUserParts.has(lastUser.parts)) return;
-
-      const isFirstUserMessage = output.messages.indexOf(lastUser) <= 1;
-      const userText = getText(lastUser.parts).toLowerCase();
-      const agent = lastUser.info && lastUser.info.agent;
-      const exclusive = EXCLUSIVE_AGENTS.has(agent);
-      const wantsToolkit = (userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools')) && (userText.includes('路由表') || userText.includes('routing table'));
-      const newRoute = matchRoute(userText);
-      const injections = [];
-
-      // 手动切换路由 / 独占模式 / 显式查看路由表 → 解除路由锁定
-      const wantsSwitch = userText.includes('切换路由') || userText.includes('换流程') || userText.includes('重新匹配');
-
-      // 路由锁定：复用已激活路由，防止用户补充条件时偏离；
-      // 更高优先级的新意图才抢占；每次命中续期（滑动30分钟过期）
-      let route = null;
-      if (exclusive || wantsToolkit || wantsSwitch) {
-        clearRouteState(directory);
-      } else {
-        const routeState = readRouteState(directory);
-        const locked = routeState && routeState.locked ? ROUTES.find((r) => r.id === routeState.activeRoute) : null;
-        route = newRoute && (!locked || newRoute.priority > locked.priority) ? newRoute : locked || newRoute;
-        if (route) writeRouteState(directory, route.id);
-      }
-
-      if (!exclusive) {
-        if (wantsToolkit) {
-          injections.push(buildFullRoutingTable());
-        } else if (route) {
-          injections.push(buildRouteInjection(route, skillsDir));
-        } else if (isFirstUserMessage) {
-          // 兜底：首条消息未命中任何关键词时，仍注入路由表，
-          // 避免模型不知道路由/工具存在而退回 bash+read 裸干（省 token：仅首条一次）
-          injections.push(buildFullRoutingTable());
-        }
-      } else {
-        injections.push([
-          '# junsi-dev-toolkit：独占模式（绕过常规路由）',
-          `当前 agent 为 \`${agent}\`（独占模式）。不注入开发子技能路由（diagnose/rdd 等），严格按本模式主 agent 指令执行；仍须遵守记忆类规范（store-decision/save-progress）。`,
-          INJECT_MARK,
-        ].join('\n'));
-      }
-
-      if (isFirstUserMessage) {
-        const upref = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
-        if (upref.trim()) {
-          injections.push([
-            '# junsi-dev-toolkit：全局用户记忆',
-            '以下为跨项目全局偏好（~/.config/opencode/.memory/preferences.md），开工前必须遵守：',
-            '',
-            upref.slice(0, MEMORY_LIMITS.compactPreference),
-            INJECT_MARK,
-          ].join('\n'));
-        }
-        if (fs.existsSync(path.join(memoryDir(directory), 'HANDOFF.md'))) {
-          injections.push([
-            '# junsi-dev-toolkit：检测到 HANDOFF',
-            `存在 \`.memory/HANDOFF.md\`（${new Date(fs.statSync(path.join(memoryDir(directory), 'HANDOFF.md')).mtime).toLocaleString()}）`,
-            '1. 调用 `restore-handoff` 工具读取完整恢复包',
-            '2. 按恢复包继续任务，不要重新扫描项目',
-            INJECT_MARK,
-          ].join('\n'));
-        }
-        if (fs.existsSync(path.join(memoryDir(directory), 'goals', 'active.md'))) {
-          injections.push([
-            '# junsi-dev-toolkit：检测到活动 Goal',
-            '存在 `.memory/goals/active.md`（未完成的迭代目标）。',
-            '1. 调用 `goal-check`（不传 advance）读取目标与进度',
-            '2. 按状态卡指令继续迭代：达标 → goal-close(achieved)；用户叫停 → goal-close(abandoned)',
-            INJECT_MARK,
-          ].join('\n'));
-        }
-      }
-
-      if (injections.length) {
-        const ref = lastUser.parts[0];
-        const texts = injections.reverse();
-        for (const text of texts) {
-          lastUser.parts.unshift({ ...ref, type: 'text', text });
-        }
-        seenUserParts.add(lastUser.parts);
-      }
-    },
-
-    'experimental.session.compacting': async (_input, output) => {
-      try {
-        const parts = ['## junsi-dev-toolkit 记忆上下文'];
-        const up = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
-        if (up.trim()) {
-          parts.push('', '### 全局用户偏好（跨项目生效）', up.slice(0, MEMORY_LIMITS.compactPreference));
-        }
-        const mem = memoryDir(directory);
-        if (!fs.existsSync(mem)) {
-          if (parts.length > 1) output.context.push(parts.join('\n'));
-          return;
-        }
-        const idx = readOrEmpty(path.join(mem, 'INDEX.md'));
-        if (idx) parts.push('', '### 任务索引', idx.slice(0, MEMORY_LIMITS.compactIndex));
-        const recent = listRecentDecisions(mem, MEMORY_LIMITS.compactDecision);
-        if (recent.length) {
-          const cards = recent
-            .map((f) => {
-              const c = readOrEmpty(path.join(mem, 'decisions', f));
-              return `- **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 6).join('\n')}`;
-            })
-            .join('\n---\n');
-          parts.push('', '### 关键决策画像（最近 ' + recent.length + ' 条，需决策依据时读取全文）', cards);
-        }
-        const gDecDir = path.join(userMemoryDir(), 'decisions');
-        if (fs.existsSync(gDecDir)) {
-          const gRecent = fs.readdirSync(gDecDir).filter((f) => f.endsWith('.md')).sort().reverse().slice(0, MEMORY_LIMITS.compactDecision);
-          if (gRecent.length) {
-            const cards = gRecent
-              .map((f) => {
-                const c = readOrEmpty(path.join(gDecDir, f));
-                return `- 🌐 **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 5).join('\n')}`;
-              })
-              .join('\n---\n');
-            parts.push('', '### 全局决策画像（跨项目，最近 ' + gRecent.length + ' 条）', cards);
+    /* ---- 2. 子技能注册（V2 发现机制） ---- */
+    try {
+      const skills = discoverSkills(skillsDir);
+      await ctx.skill.transform((editor) => {
+        for (const skill of skills) {
+          if (editor.get(skill.id)) {
+            editor.update(skill.id, (s) => {
+              s.name = skill.name;
+              s.description = skill.description;
+              s.path = skill.path;
+              s.content = skill.content;
+            });
+          } else {
+            editor.add(skill);
           }
         }
-        const handoff = readOrEmpty(path.join(mem, 'HANDOFF.md'));
-        if (handoff) parts.push('', '### HANDOFF（自包含恢复包，前 ' + MEMORY_LIMITS.compactHandoff + ' 字）', handoff.slice(0, MEMORY_LIMITS.compactHandoff));
-        output.context.push(parts.join('\n'));
+      });
+    } catch (e) {
+      jlog(`子技能注册失败: ${e && e.message ? e.message : e}`, 'warn');
+    }
+
+    /* ---- 3. Cluster / Goal / Penetration agents ---- */
+    try {
+      const existing = await ctx.agent.list();
+      const existingIds = new Set(((existing && existing.data) || existing || []).map((a) => a.id));
+      const clusterAgents = buildClusterAgents(scanAvailableModels(), skillsDir);
+      await ctx.agent.transform((editor) => {
+        for (const [id, def] of Object.entries(clusterAgents)) {
+          if (existingIds.has(id)) continue;
+          editor.update(id, (agent) => applyAgentSpec(agent, toV2Agent(id, def)));
+        }
+      });
+    } catch (e) {
+      jlog(`agent 注册失败: ${e && e.message ? e.message : e}`, 'warn');
+    }
+
+    /* ---- 4. 路由注入（prompt 准入钩子） ---- */
+    const seenSessions = new Set();
+    await ctx.session.hook('prompt', async (event) => {
+      try {
+        const sid = event.sessionID;
+        const text = (event.prompt && event.prompt.text) || '';
+        const userText = text.toLowerCase();
+        const isFirst = !seenSessions.has(sid);
+        seenSessions.add(sid);
+
+        const agent = await sessionAgentOf(ctx, sid);
+        const exclusive = EXCLUSIVE_AGENTS.has(agent);
+        const wantsToolkit =
+          (userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools')) &&
+          (userText.includes('路由表') || userText.includes('routing table'));
+        const wantsSwitch = userText.includes('切换路由') || userText.includes('换流程') || userText.includes('重新匹配');
+        const newRoute = matchRoute(userText);
+        const injections = [];
+
+        let route = null;
+        if (exclusive || wantsToolkit || wantsSwitch) {
+          clearRouteState(projectDir);
+        } else {
+          const routeState = readRouteState(projectDir);
+          const locked = routeState && routeState.locked ? ROUTES.find((r) => r.id === routeState.activeRoute) : null;
+          route = newRoute && (!locked || newRoute.priority > locked.priority) ? newRoute : locked || newRoute;
+          if (route) writeRouteState(projectDir, route.id);
+        }
+
+        if (!exclusive) {
+          if (wantsToolkit) injections.push(buildFullRoutingTable());
+          else if (route) injections.push(buildRouteInjection(route, skillsDir));
+          else if (isFirst) injections.push(buildFullRoutingTable());
+        } else {
+          injections.push(
+            [
+              '# junsi-dev-toolkit：独占模式（绕过常规路由）',
+              `当前 agent 为 \`${agent}\`（独占模式）。不注入开发子技能路由（diagnose/rdd 等），严格按本模式主 agent 指令执行；仍须遵守记忆类规范（store-decision/save-progress）。`,
+              INJECT_MARK,
+            ].join('\n')
+          );
+        }
+
+        if (isFirst) {
+          const upref = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+          if (upref.trim()) {
+            injections.push(
+              [
+                '# junsi-dev-toolkit：全局用户记忆',
+                '以下为跨项目全局偏好（~/.config/opencode/.memory/preferences.md），开工前必须遵守：',
+                '',
+                upref.slice(0, MEMORY_LIMITS.compactPreference),
+                INJECT_MARK,
+              ].join('\n')
+            );
+          }
+          if (fs.existsSync(path.join(memoryDir(projectDir), 'HANDOFF.md'))) {
+            injections.push(
+              [
+                '# junsi-dev-toolkit：检测到 HANDOFF',
+                `存在 \`.memory/HANDOFF.md\`（${new Date(fs.statSync(path.join(memoryDir(projectDir), 'HANDOFF.md')).mtime).toLocaleString()}）`,
+                '1. 调用 `restore-handoff` 工具读取完整恢复包',
+                '2. 按恢复包继续任务，不要重新扫描项目',
+                INJECT_MARK,
+              ].join('\n')
+            );
+          }
+          if (fs.existsSync(path.join(memoryDir(projectDir), 'goals', 'active.md'))) {
+            injections.push(
+              [
+                '# junsi-dev-toolkit：检测到活动 Goal',
+                '存在 `.memory/goals/active.md`（未完成的迭代目标）。',
+                '1. 调用 `goal-check`（不传 advance）读取目标与进度',
+                '2. 按状态卡指令继续迭代：达标 → goal-close(achieved)；用户叫停 → goal-close(abandoned)',
+                INJECT_MARK,
+              ].join('\n')
+            );
+          }
+        }
+
+        if (injections.length) {
+          event.prompt.text = `${injections.join('\n\n')}\n\n${text}`;
+        }
+      } catch (e) {
+        jlog(`路由注入失败: ${e && e.message ? e.message : e}`, 'warn');
+      }
+    });
+
+    /* ---- 5. 压缩钩子：注入记忆上下文 ---- */
+    await ctx.session.hook('compaction', (event) => {
+      try {
+        const context = buildCompactionContext(projectDir);
+        if (context) event.system.push({ type: 'text', text: context });
       } catch {
         // 压缩注入失败不阻塞
       }
-    },
+    });
 
-    event: async ({ event }) => {
-      if (!event || event.type !== 'session.idle') return;
+    /* ---- 6. session.idle：记忆骨架 + Goal 自驱续跑 ---- */
+    let goalIdleContinueBroken = false;
+    let lastContinueAt = 0;
+    let lastContinueRound = -1;
+
+    const onSessionIdle = async (event) => {
+      const sid = (event && event.data && event.data.sessionID) || '';
       try {
-        const mem = ensureMemoryDir(directory);
+        const mem = ensureMemoryDir(projectDir);
         const recent = listRecentDecisions(mem, 3);
         const progress = readOrEmpty(path.join(mem, 'progress', 'current.md'));
         const handoff = fs.existsSync(path.join(mem, 'HANDOFF.md'));
@@ -2045,7 +2190,7 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
           [
             '# 会话痕迹',
             `- 时间：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
-            `- 类型：session.idle 自动记录`,
+            '- 类型：session.idle 自动记录',
             `- 决策：${decisionFiles(mem).length} 条`,
             `- HANDOFF：${handoff ? '就绪' : '无'}`,
             '',
@@ -2058,51 +2203,47 @@ export const JunsiDevToolkitPlugin = async ({ client, directory }) => {
           ].join('\n'),
           'utf8'
         );
-        const active = readActiveGoal(directory);
+
+        const active = readActiveGoal(projectDir);
         if (active && /^- 模式：auto$/m.test(active) && !goalIdleContinueBroken) {
           const r = goalRoundOf(active);
           const open = countChecks(active).open;
           const limitHit = r.max !== 0 && r.done >= r.max;
-          const sid = event.properties?.sessionID;
           if (!limitHit && open > 0 && sid) {
             const now = Date.now();
-            // 防刷屏三重保护：冷却节流 / 同轮次去重 / 会话忙检测
             if (now - lastContinueAt < 30000 || r.done === lastContinueRound) return;
-            try {
-              const st = await client.session.status({ query: { directory } });
-              const status = (st && (st.data || st)) || {};
-              if (status[sid] && status[sid].type === 'busy') return;
-            } catch {
-              // status 不可用不阻塞，仅靠节流/去重兜底
-            }
             lastContinueAt = now;
             lastContinueRound = r.done;
             try {
-              await client.session.prompt({
-                path: { id: sid },
-                body: {
-                  parts: [
-                    {
-                      type: 'text',
-                      text: '继续 Goal 迭代：调用 goal-check(advance:true)，严格按状态卡指令完成本轮。无人值守运行：遇范围红线/异常预案情形直接按预案 GOAL_STOP，不猜测不等待。',
-                    },
-                  ],
-                },
+              await ctx.session.prompt({
+                sessionID: sid,
+                text: '继续 Goal 迭代：调用 goal-check(advance:true)，严格按状态卡指令完成本轮。无人值守运行：遇范围红线/异常预案情形直接按预案 GOAL_STOP，不猜测不等待。',
               });
             } catch (e) {
               goalIdleContinueBroken = true;
-              client.app.log({
-                service: 'junsi-dev-toolkit',
-                level: 'warn',
-                message: `Goal idle 自驱续跑不可用（本会话已禁用，请改用 scripts/goal-loop.ps1 外部硬循环）: ${e.message}`,
-              });
+              jlog(
+                `Goal idle 自驱续跑不可用（本会话已禁用，请改用 scripts/goal-loop.ps1 外部硬循环）: ${e && e.message ? e.message : e}`,
+                'warn'
+              );
             }
           }
         }
       } catch {
         // idle 记录失败不阻塞
       }
-    },
-  };
-};
+    };
 
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event && event.type === 'session.idle') await onSessionIdle(event);
+        }
+      } catch {
+        // 订阅中断（卸载）忽略
+      }
+    })();
+
+    return () => controller.abort();
+  },
+});

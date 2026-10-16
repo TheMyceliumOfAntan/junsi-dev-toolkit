@@ -19,7 +19,7 @@ junsi-dev-toolkit 安装/升级通用检验工具。
 源码仓库路径（可选）。提供时对比插件 hash 与 HEAD。
 
 .PARAMETER Full
-深度模式：临时安装 @opencode-ai/plugin 后真实加载插件验证工具注册。
+深度模式：临时安装 @opencode/plugin 后真实加载插件验证工具注册。
 
 .EXAMPLE
 .\verify-install.ps1
@@ -158,13 +158,13 @@ if ($Full) {
   try {
     Push-Location $temp
     npm init -y 2>&1 | Out-Null
-    npm install @opencode-ai/plugin --no-fund --no-audit 2>&1 | Out-Null
+    npm install @opencode/plugin --no-fund --no-audit 2>&1 | Out-Null
     Pop-Location
     $pkgModules = Join-Path $pkg 'node_modules'
     New-Item -ItemType Directory -Path $pkgModules -Force -ErrorAction SilentlyContinue | Out-Null
-    $junction = Join-Path $pkgModules '@opencode-ai'
+    $junction = Join-Path $pkgModules '@opencode'
     if (Test-Path $junction) { Remove-Item $junction -Recurse -Force }
-    New-Item -ItemType Junction -Path $junction -Target (Join-Path $temp 'node_modules/@opencode-ai') | Out-Null
+    New-Item -ItemType Junction -Path $junction -Target (Join-Path $temp 'node_modules/@opencode') | Out-Null
     $verify = Join-Path $scriptDir 'verify-registration.mjs'
     if (Test-Path $verify) {
       $out = & node $verify $pkg $proj 2>&1
@@ -175,7 +175,7 @@ if ($Full) {
     }
   } finally {
     Pop-Location -ErrorAction SilentlyContinue
-    $junction = Join-Path (Join-Path $pkg 'node_modules') '@opencode-ai'
+    $junction = Join-Path (Join-Path $pkg 'node_modules') '@opencode'
     if (Test-Path $junction) { Remove-Item $junction -Recurse -Force }
     if (Test-Path (Join-Path $pkg 'node_modules')) {
       $rest = Get-ChildItem (Join-Path $pkg 'node_modules') -Force
