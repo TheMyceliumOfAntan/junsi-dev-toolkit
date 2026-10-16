@@ -163,18 +163,28 @@ for (const want of ['cluster', 'penetration', 'goal', 'cluster-planner', 'cluste
 if (agentIds.length >= 14) pass(`Agent 注册 (${agentIds.length} 个)`);
 else fail(`Agent 注册不足 (${agentIds.length} 个，预期 >= 14)`);
 
-// ---------- prompt 钩子（路由注入） ----------
+// ---------- prompt 钩子（路由判定；不得污染用户消息） ----------
 const promptHook = hooks.get('prompt');
+const contextHook = hooks.get('context');
 if (!promptHook) {
   fail('未注册 prompt 钩子');
+} else if (!contextHook) {
+  fail('未注册 context 钩子');
 } else {
-  const ev = { sessionID: 'verify-session', prompt: { text: '帮我把这个 Java 项目 migrate 到 Go' }, delivery: 'queue' };
+  const original = '帮我把这个 Java 项目 migrate 到 Go';
+  const ev = { sessionID: 'verify-session', prompt: { text: original }, delivery: 'queue' };
   try {
     await promptHook(ev);
-    if (String(ev.prompt.text).includes('code-migrater')) pass('prompt 路由注入生效');
-    else fail('prompt 路由注入未生效');
+    if (ev.prompt.text !== original) fail('prompt 钩子污染了用户消息（应只判定、不改写原文）');
+    else pass('prompt 钩子未改写用户消息');
+
+    const ctxEv = { sessionID: 'verify-session', system: [] };
+    await contextHook(ctxEv);
+    const injected = ctxEv.system.map((s) => s.text || '').join('\n');
+    if (ctxEv.system.length && injected.includes('code-migrater')) pass('context 钩子把路由注入 system 提示');
+    else fail('context 钩子未把路由注入 system 提示');
   } catch (e) {
-    fail(`prompt 钩子执行失败: ${e && e.message ? e.message : e}`);
+    fail(`路由钩子执行失败: ${e && e.message ? e.message : e}`);
   }
 }
 

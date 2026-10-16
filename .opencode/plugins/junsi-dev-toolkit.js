@@ -2090,8 +2090,10 @@ export default Plugin.define({
       jlog(`agent 注册失败: ${e && e.message ? e.message : e}`, 'warn');
     }
 
-    /* ---- 4. 路由注入（prompt 准入钩子） ---- */
+    /* ---- 4. 路由注入（prompt 准入钩子：只做判定 + 暂存） ---- */
     const seenSessions = new Set();
+    // 注入内容不写回用户消息，改由 context 钩子追加到 system 提示，避免污染用户输入。
+    const pendingSystemInjections = new Map();
     await ctx.session.hook('prompt', async (event) => {
       try {
         const sid = event.sessionID;
@@ -2170,11 +2172,23 @@ export default Plugin.define({
           }
         }
 
-        if (injections.length) {
-          event.prompt.text = `${injections.join('\n\n')}\n\n${text}`;
-        }
+        if (injections.length) pendingSystemInjections.set(sid, injections.join('\n\n'));
+        else pendingSystemInjections.delete(sid);
       } catch (e) {
         jlog(`路由注入失败: ${e && e.message ? e.message : e}`, 'warn');
+      }
+    });
+
+    /* ---- 4b. 系统提示注入（context 钩子：追加到 system，不污染用户消息） ---- */
+    await ctx.session.hook('context', (event) => {
+      try {
+        const pending = pendingSystemInjections.get(event.sessionID);
+        if (pending) {
+          event.system.push({ type: 'text', text: pending });
+          pendingSystemInjections.delete(event.sessionID);
+        }
+      } catch (e) {
+        jlog(`系统提示注入失败: ${e && e.message ? e.message : e}`, 'warn');
       }
     });
 
