@@ -1,7 +1,9 @@
 /**
- * junsi-dev-toolkit plugin for OpenCode.ai (v3.1)
+ * junsi-dev-toolkit plugin for OpenCode.ai (v3.5)
  *
  * - 代码级意图路由：关键词正则匹配用户消息，命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告
+ * - RDD 阶段门禁：按会话记录 clarify/plan-pending/implement/verify，方案未确认前横幅禁止改代码
+ *   （rdd-phase 工具驱动迁移；路由锁不被补充信息顶掉，仅「切换路由」可换流程）
  * - 未匹配到开发意图（纯问答）→ 零注入（省 token）
  * - 新会话检测 .memory/HANDOFF.md → 注入恢复指令
  * - memory 自定义工具：store-decision / save-progress / prepare-handoff / restore-handoff / list-decisions / memory-doctor / save-preference
@@ -95,7 +97,7 @@ const ROUTES = [
     priority: 3,
     skillPath: '.agents/skills/junsi-dev-toolkit/memory-skill/SKILL.md',
     summary: '决策记忆 / 进度保存 / HANDOFF 跨会话恢复（.memory/ 目录）',
-    keywords: ['记住', '记录', '记一下', '决策', '保存进度', '换会话', '降智', '上下文不够', '恢复进度', '有哪些决策', '决策历史', '回顾决策', '健康审计', '记忆体检'],
+    keywords: ['记住这个', '记住我的', '记住一下', '记一下', '记录决策', '决策', '保存进度', '换会话', '降智', '上下文不够', '恢复进度', '有哪些决策', '决策历史', '回顾决策', '健康审计', '记忆体检'],
   },
   {
     id: 'computer-use',
@@ -164,6 +166,52 @@ const readSkillContent = (skillsDir, route) => {
   }
 };
 
+/* ---------- RDD 阶段门禁 ---------- */
+const RDD_ROUTE = 'requirements-driven-dev';
+
+/* 用户明确放行口令（整句短确认，避免“可以吗？”之类误判） */
+const RDD_CONFIRM_RE = /^(开始|开始吧|开干|开搞|开工|动手|动手吧|确认|确认了|可以|可以了|没问题|按这个来|就这么办|照这个做|执行吧|继续吧|go ahead|ok|okay|lgtm|start)[\s!！。.,，~～]*$/i;
+/* 范围变更信号（细节纠正不算；由模型按分级规则最终判定） */
+const RDD_SCOPE_CHANGE_RE = /(再加|新增|加个|多加|还要|顺便|另外|同时|扩展|扩充|换成|改成|改需求|需求变|支持|也要)/;
+/* 用户显式要求跳过方案（仅用户主动说才算） */
+const RDD_SKIP_PLAN_RE = /(直接做|直接开干|直接动手|跳过方案|不用方案|别问了|不用确认|跳过确认)/;
+
+/* rdd-phase 工具与注入钩子共享的会话上下文（sessionID 全局唯一） */
+let lastActiveSession = '';
+
+const RDD_PHASE_BANNER = {
+  clarify: [
+    '## 🚫 阶段门禁：CLARIFY（未放行）',
+    '当前阶段为 **澄清**。只允许：读代码调研、提问、复述意图、给方案。',
+    '**禁止**：编辑/创建文件、跑构建、跑测试、写任何实现代码。',
+    '流程：澄清到零模糊 → 输出**完整实施方案** → 调用 `rdd-phase(action:"plan")` → 停下等用户明确说"开始"。',
+  ],
+  'plan-pending': [
+    '## 🚫 阶段门禁：PLAN-PENDING（等用户确认）',
+    '完整方案已提交，**正在等用户确认**。',
+    '**禁止**：任何代码改动、任何"先做一点"的试探。',
+    '用户说"开始/开干/确认"后 → 调用 `rdd-phase(action:"start")` → 先 git checkpoint 再动手。',
+    '用户提修改意见 → 更新方案，再 `rdd-phase(action:"plan")`，继续等确认。',
+  ],
+  implement: [
+    '## ✅ 阶段门禁：IMPLEMENT（已放行）',
+    '方案已确认，可以改代码。',
+    '- 开工第一步：`git -c commit.gpgsign=false commit -m "checkpoint: ..."`，回复里贴出 commit hash。',
+    '- 只做方案内的改动；超出范围立即停下回到 CLARIFY。',
+    '- 中途补充：细节纠正（字段名/文案/路径）可直接并入；范围变更（新增功能/改行为）必须更新方案并等确认。',
+  ],
+  verify: [
+    '## ✅ 阶段门禁：VERIFY（收尾验证）',
+    '只做验证与收尾：lint/typecheck/build/test 实际运行并粘贴输出，影响分析，意图逐条比对。',
+    '**禁止**新增功能。全部通过 → `store-decision`（如涉及选型）→ project-docs 写回 → `save-progress`。',
+  ],
+};
+
+const buildPhaseBanner = (phase, notes = []) => {
+  const body = RDD_PHASE_BANNER[phase] || RDD_PHASE_BANNER.clarify;
+  return [...body, ...(notes.length ? ['', ...notes] : []), INJECT_MARK].join('\n');
+};
+
 const buildRouteInjection = (route, skillsDir) => {
   const skillBody = readSkillContent(skillsDir, route);
   return [
@@ -178,7 +226,8 @@ const buildRouteInjection = (route, skillsDir) => {
     '  4. 涉及 API/架构/UI/行为变更 → 必须调用 project-docs 的 `update_doc`/`create_adr`，不得自己乱写文档',
     '  5. 阶段确认后 → 必须调用 `store-decision`',
     '  6. 任务完成 → 必须调用 `save-progress`',
-    '  7. 缺任何一项不得说"完成"',
+    '  7. 有阶段门禁横幅时，阶段未放行前禁止改代码（门禁优先级高于用户催促）',
+    '  8. 缺任何一项不得说"完成"',
     '',
     '## 子技能全文（必读必守）',
     '',
@@ -232,44 +281,95 @@ const MEMORY_LIMITS = {
   compactPreference: 800,
   compactIndex: 20 * 1024,
   doctorHandoffStaleDays: 7,
-  routeStateTtlMs: 30 * 60 * 1000, // 路由状态30分钟过期
+  routeStateTtlMs: 8 * 60 * 60 * 1000, // 路由锁 8 小时滑动过期（每条消息续期），避免长任务中途丢阶段
 };
 
-/* 路由状态持久化：防止用户补充条件时路由偏离 */
+/* 路由状态持久化 v2：按会话隔离 + 阶段机，防止用户补充条件时路由偏离/阶段回退 */
+const ROUTE_STATE_VERSION = 2;
 const routeStatePath = (projectDir) => path.join(memoryDir(projectDir), 'route-state.json');
 
-const readRouteState = (projectDir) => {
+const readRouteStateFile = (projectDir) => {
   try {
     const p = routeStatePath(projectDir);
-    if (!fs.existsSync(p)) return null;
+    if (!fs.existsSync(p)) return { version: ROUTE_STATE_VERSION, sessions: {} };
     const data = JSON.parse(fs.readFileSync(p, 'utf8'));
-    // 过期自动清除
-    if (data.activatedAt && Date.now() - new Date(data.activatedAt).getTime() > MEMORY_LIMITS.routeStateTtlMs) {
-      fs.unlinkSync(p);
-      return null;
+    // 旧结构（顶层 activeRoute）直接作废，避免旧锁把项目卡死
+    if (!data || data.version !== ROUTE_STATE_VERSION || typeof data.sessions !== 'object' || !data.sessions) {
+      return { version: ROUTE_STATE_VERSION, sessions: {} };
     }
     return data;
   } catch {
-    return null;
+    return { version: ROUTE_STATE_VERSION, sessions: {} };
   }
 };
 
-const writeRouteState = (projectDir, routeId) => {
-  const mem = memoryDir(projectDir);
-  fs.mkdirSync(mem, { recursive: true });
+const writeRouteStateFile = (projectDir, data) => {
+  try {
+    const mem = memoryDir(projectDir);
+    fs.mkdirSync(mem, { recursive: true });
+    fs.writeFileSync(routeStatePath(projectDir), JSON.stringify(data, null, 2), 'utf8');
+  } catch {}
+};
+
+const readRouteState = (projectDir, sessionID) => {
+  if (!sessionID) return null;
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID];
+  if (!st) return null;
+  const age = Date.now() - new Date(st.updatedAt || 0).getTime();
+  if (!st.updatedAt || age > MEMORY_LIMITS.routeStateTtlMs) {
+    delete data.sessions[sessionID];
+    writeRouteStateFile(projectDir, data);
+    return null;
+  }
+  return st;
+};
+
+const writeRouteState = (projectDir, sessionID, { route, phase }) => {
+  const data = readRouteStateFile(projectDir);
   const state = {
-    activeRoute: routeId,
-    activatedAt: new Date().toISOString(),
-    locked: true,
+    route,
+    phase: phase || 'n/a',
+    updatedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(routeStatePath(projectDir), JSON.stringify(state, null, 2), 'utf8');
+  data.sessions[sessionID || ''] = state;
+  writeRouteStateFile(projectDir, data);
   return state;
 };
 
-const clearRouteState = (projectDir) => {
+/* 滑动续期：锁被命中时刷新时间戳 */
+const touchRouteState = (projectDir, sessionID) => {
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID || ''];
+  if (!st) return null;
+  st.updatedAt = new Date().toISOString();
+  writeRouteStateFile(projectDir, data);
+  return st;
+};
+
+const setRoutePhase = (projectDir, sessionID, phase) => {
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID || ''];
+  if (!st) return null;
+  st.phase = phase;
+  st.updatedAt = new Date().toISOString();
+  writeRouteStateFile(projectDir, data);
+  return st;
+};
+
+/* sessionID 缺省时清空全部（save-progress 等工具拿不到会话时兜底） */
+const clearRouteState = (projectDir, sessionID) => {
   try {
-    const p = routeStatePath(projectDir);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
+    if (!sessionID) {
+      const p = routeStatePath(projectDir);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+      return;
+    }
+    const data = readRouteStateFile(projectDir);
+    if (data.sessions[sessionID]) {
+      delete data.sessions[sessionID];
+      writeRouteStateFile(projectDir, data);
+    }
   } catch {}
 };
 
@@ -494,7 +594,7 @@ const registerMemoryTools = async (tools) => {
       appendSessionTrace(mem, { task: args.task, stage: args.stage, source: 'save-progress' });
       // 任务完成（VERIFY）时自动解锁路由，允许下次新意图重新匹配
       if (args.stage && args.stage.toUpperCase() === 'VERIFY') {
-        clearRouteState(context.directory);
+        clearRouteState(context.directory, context.sessionID);
       }
       return `进度已保存: ${file}\n${idx.message}`;
     },
@@ -713,6 +813,50 @@ const registerMemoryTools = async (tools) => {
   });
 
   return { ok: true };
+};
+
+/* ---------- RDD 阶段门禁工具 ---------- */
+
+const registerRddTools = async (tools) => {
+  tools['rdd-phase'] = tool({
+    description:
+      'requirements-driven-dev 阶段门禁。方案输出完 → plan（登记待确认）；用户明确说“开始”后 → start（放行实现）；实现完成 → done（进入验证）；status 只读。阶段未放行前禁止改代码。',
+    args: {
+      action: schema.enum(['plan', 'start', 'done', 'status']).describe('plan=方案已出待确认 / start=用户已确认放行 / done=实现完成进入验证 / status=查看当前阶段'),
+    },
+    async execute(args, context) {
+      const sid = (context && context.sessionID) || lastActiveSession || '';
+      const projectDir = (context && context.directory) || process.cwd();
+      const state = readRouteState(projectDir, sid);
+      if (!state) {
+        return '当前会话没有激活的开发路由（可能已过期或已完成）。先提出开发需求，路由激活后再用本工具。';
+      }
+      if (state.route !== RDD_ROUTE) {
+        return `当前会话路由为 \`${state.route}\`，不是 requirements-driven-dev，无需阶段门禁。`;
+      }
+      const phase = state.phase || 'clarify';
+      if (args.action === 'status') {
+        return `当前阶段：\`${phase}\`\n\n${buildPhaseBanner(phase)}`;
+      }
+      if (args.action === 'plan') {
+        if (phase === 'implement') {
+          return '⚠️ 当前已是 IMPLEMENT（方案已确认）。若方案有实质变更，需先向用户说明并等确认，再调用 start；否则不要重复登记 plan。';
+        }
+        setRoutePhase(projectDir, sid, 'plan-pending');
+        return '✅ 已登记：PLAN-PENDING（方案待确认）。现在必须停下，等用户明确说“开始”后再调用 rdd-phase(action:"start")。';
+      }
+      if (args.action === 'start') {
+        if (phase === 'implement') return '已处于 IMPLEMENT，无需重复放行。开工前别忘了 git checkpoint。';
+        if (phase === 'clarify') {
+          return '⚠️ 当前还是 CLARIFY：尚未提交完整方案。请先输出完整方案并调用 rdd-phase(action:"plan")，等用户确认后再 start。';
+        }
+        setRoutePhase(projectDir, sid, 'implement');
+        return '✅ 已放行：IMPLEMENT。第一步执行 `git -c commit.gpgsign=false commit -m "checkpoint: ..."` 并在回复里贴出 commit hash，然后按方案最小改动实施。';
+      }
+      setRoutePhase(projectDir, sid, 'verify');
+      return '✅ 已进入 VERIFY：实际运行 lint/typecheck/build/test 并粘贴输出，做影响分析与意图比对；全部通过后调用 project-docs 写回 + save-progress。';
+    },
+  });
 };
 
 /* ---------- Cluster 模式：动态模型检测 + Agent 注入 ---------- */
@@ -1395,6 +1539,7 @@ const TOOL_INDEX = [
   { id: 'task', use: '派发子代理（独立子任务）' },
   { id: 'skill', use: '加载技能（SKILL.md 工作流）' },
   { id: 'store-decision', use: '阶段确认后记录决策' },
+  { id: 'rdd-phase', use: 'RDD 阶段门禁：plan 待确认 / start 放行 / done 验证' },
   { id: 'save-progress', use: '任务完成保存进度' },
   { id: 'prepare-handoff/restore-handoff', use: '跨会话恢复（换会话时）' },
   { id: 'list-decisions/memory-doctor/save-preference', use: '决策回顾/记忆体检/全局偏好' },
@@ -1857,7 +2002,7 @@ const registerGoalTools = async (tools) => {
       const idx = writeIndex(mem, { task: `[GOAL] ${title}`, stage: `已归档（${label}）` });
       appendSessionTrace(mem, { task: `[GOAL] ${title}`, stage: args.result, source: 'goal-close' });
       // Goal 完成时自动解锁路由
-      clearRouteState(context.directory);
+      clearRouteState(context.directory, context.sessionID);
       return `GOAL 已归档（${label}）: ${file}\n${idx.message}\n别忘了 save-progress。`;
     },
   });
@@ -1872,8 +2017,8 @@ const toToolInfo = (name, def, projectDir) => ({
   name,
   description: def.description,
   input: buildInput(def.args),
-  execute: async (input) => {
-    const out = await def.execute(input || {}, { directory: projectDir });
+  execute: async (input, context) => {
+    const out = await def.execute(input || {}, { ...(context || {}), directory: projectDir });
     if (typeof out === 'string') return { content: out };
     if (out && typeof out === 'object' && 'content' in out) return out;
     return { content: String(out ?? '') };
@@ -2044,6 +2189,7 @@ export default Plugin.define({
     /* ---- 1. 自定义工具 ---- */
     const tools = {};
     await registerMemoryTools(tools);
+    await registerRddTools(tools);
     await registerClusterTools(tools, skillsDir);
     await registerUtilityTools(tools);
     await registerGoalTools(tools);
@@ -2108,23 +2254,80 @@ export default Plugin.define({
           (userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools')) &&
           (userText.includes('路由表') || userText.includes('routing table'));
         const wantsSwitch = userText.includes('切换路由') || userText.includes('换流程') || userText.includes('重新匹配');
-        const newRoute = matchRoute(userText);
+        // 去掉切换指令本身再匹配，避免「切换路由」里的"路由"误命中 project-docs
+        const newRoute = matchRoute(wantsSwitch ? userText.replace(/切换路由|换流程|重新匹配/g, ' ') : userText);
         const injections = [];
 
         let route = null;
-        if (exclusive || wantsToolkit || wantsSwitch) {
+        const phaseNotes = [];
+        if (exclusive) {
           clearRouteState(projectDir);
         } else {
-          const routeState = readRouteState(projectDir);
-          const locked = routeState && routeState.locked ? ROUTES.find((r) => r.id === routeState.activeRoute) : null;
-          route = newRoute && (!locked || newRoute.priority > locked.priority) ? newRoute : locked || newRoute;
-          if (route) writeRouteState(projectDir, route.id);
+          lastActiveSession = sid;
+          if (wantsToolkit) clearRouteState(projectDir);
+          // 显式"切换路由"：只解锁本会话，随后重新匹配
+          if (wantsSwitch) clearRouteState(projectDir, sid);
+
+          if (!wantsToolkit) {
+            const routeState = wantsSwitch ? null : readRouteState(projectDir, sid);
+            const locked = routeState ? ROUTES.find((r) => r.id === routeState.route) : null;
+            if (locked) {
+              // 锁优先：补充信息/同类关键词不得顶掉当前流程，只有显式"切换路由"才切
+              route = locked;
+              touchRouteState(projectDir, sid);
+              if (newRoute && newRoute.id !== locked.id) {
+                phaseNotes.push(
+                  `- 本次消息疑似 \`${newRoute.id}\` 意图，但当前会话已锁定 \`${locked.id}\` 流程，继续沿用。若确实要换流程，请告知用户并让用户回复「切换路由」。`
+                );
+              }
+            } else {
+              route = newRoute;
+              if (route) {
+                writeRouteState(projectDir, sid, {
+                  route: route.id,
+                  phase: route.id === RDD_ROUTE ? 'clarify' : 'n/a',
+                });
+              }
+            }
+
+            if (route && route.id === RDD_ROUTE) {
+              const st = readRouteState(projectDir, sid);
+              const prevPhase = (st && st.phase) || 'clarify';
+              let phase = prevPhase;
+              const trimmed = text.trim();
+              const scopeChange = RDD_SCOPE_CHANGE_RE.test(trimmed);
+
+              if (phase === 'clarify' || phase === 'plan-pending') {
+                if (RDD_CONFIRM_RE.test(trimmed)) {
+                  phase = 'implement';
+                  phaseNotes.push('- 已识别用户确认口令 → 阶段切换为 IMPLEMENT。开工前必须 git checkpoint 并贴出 hash。');
+                } else if (RDD_SKIP_PLAN_RE.test(trimmed)) {
+                  phase = 'implement';
+                  phaseNotes.push('- 用户明确要求跳过方案确认 → 阶段切换为 IMPLEMENT（仅此一次）。开工前必须 git checkpoint 并贴出 hash。');
+                }
+              } else if (phase === 'implement' && scopeChange) {
+                phase = 'clarify';
+                phaseNotes.push(
+                  '- ⚠️ 检测到疑似范围变更（新增/改动需求）：回到 CLARIFY。先判断——细节纠正（字段名/文案/路径）可直接并入并说明；新增功能或行为变更必须更新完整方案、调用 `rdd-phase(action:"plan")` 并等用户确认。'
+                );
+              } else if (phase === 'verify' && scopeChange) {
+                phase = 'clarify';
+                phaseNotes.push('- 上一任务已进入 VERIFY，本次为新需求：重新走 CLARIFY，不得直接续写代码。');
+              }
+
+              if (phase !== prevPhase) setRoutePhase(projectDir, sid, phase);
+              injections.push(buildRouteInjection(route, skillsDir));
+              injections.push(buildPhaseBanner(phase, phaseNotes));
+            } else if (route) {
+              injections.push(buildRouteInjection(route, skillsDir));
+            } else if (isFirst) {
+              injections.push(buildFullRoutingTable());
+            }
+          }
         }
 
         if (!exclusive) {
           if (wantsToolkit) injections.push(buildFullRoutingTable());
-          else if (route) injections.push(buildRouteInjection(route, skillsDir));
-          else if (isFirst) injections.push(buildFullRoutingTable());
         } else {
           injections.push(
             [

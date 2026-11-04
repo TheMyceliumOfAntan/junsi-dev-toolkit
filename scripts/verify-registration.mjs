@@ -30,7 +30,7 @@ if (!fs.existsSync(pluginFile)) {
 
 const expectedTools = [
   'store-decision', 'save-progress', 'prepare-handoff', 'restore-handoff',
-  'list-decisions', 'memory-doctor', 'save-preference',
+  'list-decisions', 'memory-doctor', 'save-preference', 'rdd-phase',
   'cluster-task-prompt', 'cluster-scan-models', 'cluster-allocation',
   'goal-set', 'goal-check', 'goal-close',
   'tool-search', 'cron-create',
@@ -183,6 +183,16 @@ if (!promptHook) {
     const injected = ctxEv.system.map((s) => s.text || '').join('\n');
     if (ctxEv.system.length && injected.includes('code-migrater')) pass('context 钩子把路由注入 system 提示');
     else fail('context 钩子未把路由注入 system 提示');
+
+    // RDD 阶段门禁
+    const rddEv = { sessionID: 'verify-rdd', prompt: { text: '帮我加个导出功能' }, delivery: 'queue' };
+    await promptHook(rddEv);
+    const rddCtx = { sessionID: 'verify-rdd', system: [] };
+    await contextHook(rddCtx);
+    const rddInj = rddCtx.system.map((s) => s.text || '').join('\n');
+    if (rddInj.includes('阶段门禁：CLARIFY') && rddInj.includes('rdd-phase'))
+      pass('RDD 阶段门禁注入（CLARIFY + rdd-phase）');
+    else fail('RDD 阶段门禁未注入');
   } catch (e) {
     fail(`路由钩子执行失败: ${e && e.message ? e.message : e}`);
   }

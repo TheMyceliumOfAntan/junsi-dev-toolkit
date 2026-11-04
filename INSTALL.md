@@ -108,6 +108,18 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 - MCP 注册见上方「注册 wsl-pentest MCP（必装）」；未配置时自动回退 bash 执行 `wsl -e bash -c "<命令>"`。
 - ⚠️ **仅对您拥有或已获书面授权的系统进行测试**；除报告目录外不得修改任何文件。
 
+## RDD 阶段门禁（新功能开发）
+
+`requirements-driven-dev` 由插件按会话记录阶段：`clarify → plan-pending → implement → verify`。
+
+- 路由命中后进入 `clarify`：只调研+提问，**禁止改代码**。
+- AI 给出完整方案后调用 `rdd-phase(action:"plan")`，横幅变成 🚫 PLAN-PENDING，必须停下等你确认。
+- 你回复「开始 / 开干 / 确认」→ 自动放行 `implement`，AI 必须先 `git checkpoint` 并贴出 hash。
+- 干活中途补充：细节纠正（字段名/文案/路径）直接继续；新增功能/改行为会打回 `clarify` 重新出方案。
+- 想换流程（比如从 RDD 切到 Bug 修复）：直接说「**切换路由**」，路由锁只对当前会话生效。
+
 ## 验证
 
-对 AI 说"帮我查一下项目文档"或"加个功能"，如果能自动路由到对应子技能，说明安装成功。新工具验证：说"找一下处理文件的工具"（应触发 `tool-search`）；说"权衡一下这两个方案"（应路由到 `advisor`）。
+对 AI 说"帮我查一下项目文档"或"加个功能"，如果能自动路由到对应子技能，说明安装成功。新工具验证：说"找一下处理文件的工具"（应触发 `tool-search`）；说"权衡一下这两个方案"（应路由到 `advisor`）；说"加个登录页"后，AI 应先调研提问、给出完整方案并停下等你说「开始」，而不是直接开工。
+
+> 回归测试：`node scripts/test-route-state.mjs .`（路由锁 + 阶段门禁 9 组场景）。
