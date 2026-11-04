@@ -16,6 +16,7 @@
 - **定时任务（cron-create）**：Windows 计划任务（schtasks）创建/列出/删除，支持"定时提醒/每天执行"。
 
 - **Cluster 模式（Agent 集群）**：主 Agent（`cluster`，Tab 切换）总体规划 → **动态检测本机可用模型**（`cluster-scan-models`，读 auth.json + 环境变量）→ 生成任务块→专精模型分配方案（`cluster-allocation`）→ **question 工具问用户确认** → 派发给 5 个专精 Subagent 并行执行 → 汇总验证。Subagent 模型按本机可用性自动降级。
+- **RDD 阶段门禁（v3.5）**：`requirements-driven-dev` 走 `clarify → plan-pending → implement → verify` 状态机（`rdd-phase` 工具 + 每轮注入门禁横幅）。**方案未经用户「开始」确认前，插件横幅明确禁止改代码**；路由锁按会话隔离、8 小时滑动续期，补充信息/同类关键词不再抢锁（只有显式「切换路由」才换流程）；中途补充分级处理——细节纠正直接并入，范围变更打回 `clarify` 重新确认；`IMPLEMENT` 前与 `VERIFY` 前各强制一次 git checkpoint（`-c commit.gpgsign=false`，必须贴 hash）。
 - **代码级路由 + 子技能全文注入**：插件用关键词正则匹配用户消息（含"优化/重构/改进/集群"，以及"全黑/黑屏/卡顿/很慢/没反应/不加载"等口语化故障描述），命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告（`📌 路由宣告: {id}`）+ 强制完成清单；**首条消息未命中任何关键词时也注入一次精简路由表**（避免模型不知道路由/工具存在而退回裸 bash），后续纯问答零注入，省 token。
 - **Memory v3（7 个真实工具）**：`store-decision`（支持 `scope=global` 全局决策）/ `save-progress`（进度历史版本化，不覆盖）/ `prepare-handoff` / `restore-handoff`（`complete` 归档）/ `list-decisions`（分词模糊检索，合并项目+全局）/ `memory-doctor`（健康审计）/ `save-preference`（全局偏好）。自动维护 `.memory/`、`INDEX.md`（≤200 行硬上限）、`.gitignore`。
 - **强制记忆与文档**：子技能完成清单强制调用 `store-decision`/`save-progress`，涉及 API/架构/UI 变更强制走 project-docs 的 `update_doc`/`create_adr`，禁止乱写文档。
@@ -31,9 +32,9 @@
 | **cluster** | Agent 集群：主控统筹 + 专精模型 Subagent 并行 | 集群、多agent、并行分工 |
 | **code-migrater** | 跨语言/跨框架代码移植 | 移植、迁移、migrate |
 | **diagnose-before-fix** | Bug 修复（证据优先：基线/三档证据/探针/回归验证会失败） | 报错、不工作、崩溃、白屏、全黑、卡顿、很慢、没反应 |
-| **requirements-driven-dev** | 新功能开发（澄清 -> 实现 -> 验证） | 添加、新增、实现 |
+| **requirements-driven-dev** | 新功能开发（澄清 → 方案确认门禁 → 实现 → 验证，`rdd-phase` 状态机） | 添加、新增、实现 |
 | **project-docs** | 项目知识中枢（15个MCP代码感知工具） | 文档、规范、ADR、API、路由 |
-| **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住、保存进度、换会话、有哪些决策、健康审计 |
+| **memory-skill** | 决策记忆、进度保存、跨会话恢复、记忆审计 | 记住这个、记住我的、保存进度、换会话、有哪些决策、健康审计 |
 | **advisor** | 决策顾问（权衡矩阵 + 推荐 + 确认） | 顾问、权衡、方案对比、选哪个 |
 | **computer-use** | 浏览器自动化（playwright MCP 操作闭环） | computer_use、操作电脑、浏览器自动化 |
 | **goal** | 目标迭代模式（设目标+验收标准，多轮推进直到达标/达上限） | Tab 切换 goal 会话、goal-set/goal-check/goal-close |

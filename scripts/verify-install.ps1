@@ -8,9 +8,9 @@ junsi-dev-toolkit 安装/升级通用检验工具。
   1. 包目录与关键文件完整性
   2. 插件 JS 语法（node --check）
   3. 版本标记（SKILL.md v3 / 7 个 memory 工具）
-  4. 全部工具名是否在插件源码中注册（7 memory + 3 cluster + 3 goal + 2 utility = 15）
+  4. 全部工具名是否在插件源码中注册（7 memory + 1 rdd + 3 cluster + 3 goal + 2 utility = 16）
   5. 与源码仓库 HEAD 的 hash 一致性（-RepoPath 提供时）
-  6. -Full：真实加载插件，断言 15 个工具全部注册 + memory-doctor 冒烟执行
+  6. -Full：真实加载插件，断言 16 个工具全部注册 + memory-doctor 冒烟执行
 
 .PARAMETER PackagePath
 已安装包目录（node_modules/junsi-dev-toolkit）。留空自动查找常见安装位置。
@@ -169,7 +169,7 @@ if ($Full) {
     if (Test-Path $verify) {
       $out = & node $verify $pkg $proj 2>&1
       Write-Host $out
-      Check ($LASTEXITCODE -eq 0) '深度注册验证（15 工具 + memory-doctor 冒烟）'
+      Check ($LASTEXITCODE -eq 0) '深度注册验证（16 工具 + memory-doctor 冒烟）'
     } else {
       Check $false "缺少 $verify"
     }

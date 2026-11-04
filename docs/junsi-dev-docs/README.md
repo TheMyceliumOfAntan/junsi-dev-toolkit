@@ -1,58 +1,62 @@
 # 项目文档索引
+最后更新：2026-11-04 13:14
 
-这是 `junsi-dev-toolkit` 项目知识中枢的文档模板。
+## 1-决策记录
 
-安装工具包后，AI 会自动将项目文档管理在此目录下。
+*ADR 架构决策记录*
 
-## 目录结构
+- [ADR-001：文档归档与标签索引（archive + tag）](1-决策记录/ADR-001-文档归档与标签索引-archive---tag-.md)
+- [ADR-002：归档为主 + paths[] 补充接入无法归档的外部文档](1-决策记录/ADR-002-归档为主---paths---补充接入无法归档的外部文档.md)
+- [ADR-003：RDD 阶段门禁与按会话路由锁](1-决策记录/ADR-003-RDD-阶段门禁与按会话路由锁.md)
 
-```
-docs/junsi-dev-docs/
-├── 1-决策记录/     # ADR 架构决策记录
-├── 2-架构设计/     # 系统架构、模块设计
-├── 3-API规范/      # RESTful API 设计规范
-├── 4-编码规范/     # 各语言编码规范
-├── 5-数据库设计/   # 表结构、ER 图
-├── 6-UI/组件设计/  # UI 控件、组件设计规范
-├── 7-调用规范/     # 服务间调用、异常处理、日志规范
-├── 8-部署运维/     # 部署架构、环境配置
-└── 9-系统要求/     # 功能需求、非功能需求
-```
+## 2-架构设计
 
-## 使用方式
+*系统架构、模块设计*
 
-通过 `project-docs` MCP Server 管理文档，无需手动操作：
+（暂无文档）
 
-- 查询文档：`query_docs(keywords="关键词")`
-- 创建 ADR：`create_adr(title, background, decision)`
-- 更新文档：`update_doc(doc_path, content, change_description)`
-- 整理文档：`organize_docs()`
-- 生成文档：`generate_docs(doc_types=[...])`
+## 3-API规范
 
+*RESTful API 设计规范*
 
-### 2026-09-19 更新
-## 归档与标签（archive + tag）
+（暂无文档）
 
-新增工具（处理已按自定义目录整理的文档树，如 `docs/cookbook/`、`docs/subsystems/`）：
+## 4-编码规范
 
-- 原地登记索引：`index_docs(dry_run=false)` — 扫描 `docs/**` 与项目根，登记到 `docs/junsi-dev-docs/docs-index.json`，不移动文件
-- 归档整理：`organize_docs(assignments=[{path,category}], dry_run=false)` — 按 9 大分类归档，原路径写入索引并转为 tag；默认 `dry_run=true` 仅预览
-- 打标签：`tag_docs(paths, tags, mode="add|remove|set")` — 写入索引，不改动文档文件
-- 查标签：`list_tags(tag)`
-- 回滚：`revert_docs(dry_run=false)` — 按 `original_path` 把文档移回原位
-- 按标签检索：`query_docs(tags=["cookbook","core"])` — tag 为 AND 匹配，跨全 `docs/` 检索
+*各语言编码规范*
 
-标签来源 = 原路径目录段（自动派生）+ `explicit_tags`（手动叠加）。
+（暂无文档）
 
+## 5-数据库设计
 
-### 2026-09-19 更新
-## 补充：无法归档的外部文档（paths[]）
+*表结构、ER 图*
 
-部分文档树被生成器/i18n 门禁/路由表/相对链接强绑定，物理移动会拆链，属于「无法归档」。这类文档登记进 `docs-index.json` 的 `paths[{id?, path}]` 就地接入，**不移动**：
+（暂无文档）
 
-- `index_docs(paths=["docs"])` 登记外部路径并重建索引；外部文档自动分配 `id`
-- `organize_docs` 归档时**跳过** paths[] 登记的文档（受保护，绝不移动）
-- `tag_docs(ids=[...], tags=[...])` 给外部文档打标签
-- `query_docs(tags=[...])` / `list_tags` 跨内外检索（tags AND）
+## 6-UI/组件设计
 
-归档（`organize_docs` → junsi-dev-docs 9 分类，含 `original_path` 标签与 `revert_docs` 回滚）与外部接入（`paths[]`）并存，互不影响。
+*UI 控件、组件设计规范*
+
+（暂无文档）
+
+## 7-调用规范
+
+*服务间调用、异常处理、日志规范*
+
+（暂无文档）
+
+## 8-部署运维
+
+*部署架构、环境配置*
+
+（暂无文档）
+
+## 9-系统要求
+
+*功能需求、非功能需求*
+
+（暂无文档）
+
+## 标签索引
+
+- **1-决策记录** (3): [ADR-001-文档归档与标签索引-archive---tag-](1-决策记录/ADR-001-文档归档与标签索引-archive---tag-.md), [ADR-002-归档为主---paths---补充接入无法归档的外部文档](1-决策记录/ADR-002-归档为主---paths---补充接入无法归档的外部文档.md), [ADR-003-RDD-阶段门禁与按会话路由锁](1-决策记录/ADR-003-RDD-阶段门禁与按会话路由锁.md)
