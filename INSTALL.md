@@ -108,6 +108,17 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 - MCP 注册见上方「注册 wsl-pentest MCP（必装）」；未配置时自动回退 bash 执行 `wsl -e bash -c "<命令>"`。
 - ⚠️ **仅对您拥有或已获书面授权的系统进行测试**；除报告目录外不得修改任何文件。
 
+## 破坏性操作护栏（全局）
+
+插件每轮把硬规则注入 system 提示，并在 `tool.execute.before` 拦截危险命令：
+
+- 禁止对 `$HOME` / `~` / `%USERPROFILE%` / 盘根及其通配符递归删除或覆盖；
+- 删除前必须打印解析后的绝对路径，路径含通配符或层级过浅即停手；
+- 禁止删除 `.ssh`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`.git`；
+- 项目内 `./dist`、`./build`、`./node_modules` 的清理照常允许。
+
+> 建议同时在 `~/.config/opencode/AGENTS.md` 写一份同样的规则（本机已写入），双保险。
+
 ## RDD 阶段门禁（新功能开发）
 
 `requirements-driven-dev` 由插件按会话记录阶段：`clarify → plan-pending → implement → verify`。

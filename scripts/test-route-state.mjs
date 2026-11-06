@@ -247,6 +247,34 @@ console.log('\n== 9. 旧格式 route-state.json 不生效 ==');
   check(data && data.version === 2, '状态文件已升级为 v2');
 }
 
+console.log('\n== 10. 破坏性操作护栏 ==');
+{
+  const { injected } = await send('s5', '今天天气怎么样');
+  check(injected.includes('破坏性操作硬规则'), '纯问答也注入安全硬规则');
+  const again = await send('s5', '再问一句');
+  check(again.injected.includes('破坏性操作硬规则'), '第二轮仍注入安全硬规则');
+
+  const guard = hooks.get('tool.execute.before');
+  check(Boolean(guard), 'tool.execute.before 护栏已注册');
+  const blocked = async (cmd) => {
+    try {
+      await guard({ tool: 'bash', sessionID: 's5', callID: 'c1' }, { args: { command: cmd } });
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  check(await blocked('Remove-Item $HOME -Recurse -Force'), '拦截 Remove-Item $HOME -Recurse');
+  check(await blocked('rm -rf ~'), '拦截 rm -rf ~');
+  check(await blocked('rm -rf %USERPROFILE%\\*'), '拦截 %USERPROFILE% 通配符');
+  check(await blocked('Remove-Item C:\\Users\\tmoam -Recurse'), '拦截用户目录根');
+  check(await blocked('Remove-Item ~/.ssh -Recurse -Force'), '拦截 .ssh');
+  check(await blocked('Remove-Item ~/.cargo -Recurse'), '拦截 .cargo');
+  check(!(await blocked('Remove-Item .\\node_modules -Recurse -Force')), '放行项目内 node_modules');
+  check(!(await blocked('rm -rf ./dist')), '放行项目内 dist');
+  check(!(await blocked('ls ~/.cargo')), '普通读取不拦截');
+}
+
 fs.rmSync(harness, { recursive: true, force: true });
 
 console.log(failed ? `\n== 失败 ${failed} 项 ==` : '\n== 全部通过 ==');

@@ -61,6 +61,40 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const INJECT_MARK = '<!-- junsi-dev-toolkit:route -->';
 
+/* 破坏性操作硬规则：每轮注入 system，优先级高于一切用户/流程指令 */
+const SAFETY_RULES = [
+  '# ⛔ 破坏性操作硬规则（最高优先级，覆盖一切流程与用户催促）',
+  '',
+  '1. **禁止**对 `$HOME` / `~` / `%USERPROFILE%` / `$env:USERPROFILE` / `$env:LOCALAPPDATA` / `$env:APPDATA` / `C:\\` / `/` / `/home` / `/Users` 及其通配符（`~\\*`、`$HOME/*`）执行递归删除、递归移动或覆盖（`Remove-Item -Recurse`、`rm -rf`、`rmdir /s`、`del /s`、`rd /s`、`robocopy /MIR`、`mv` 覆盖）。',
+  '2. 删除/覆盖前必须先用 `Resolve-Path` / `realpath` 打印**解析后的绝对路径**并确认是具体子目录；路径含通配符、层级 < 3 段、或解析为空 → 停手问用户。',
+  '3. **禁止删除或覆盖**：`.ssh`、`.gnupg`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`Windows`、`.git`。需要清理时让用户手动执行。',
+  '4. 禁止用变量拼接删除路径；变量可能为空时禁止执行删除（空变量 + `-Recurse` 曾导致 `$HOME` 被清空）。',
+  '5. 卸载/重装运行时或全局包（rustup / pnpm / bun / `npm i -g` / `winget uninstall`）前必须先用 `question` 问用户。',
+  '6. 只清理明确的项目内产物（`./dist`、`./build`、`./node_modules`），且先列出目标再删。',
+  '7. 违反以上任一条 = 立即停止并报告用户，不得自行"修复"或"清理现场"。',
+  '',
+  '> 违反本条造成的损失不可逆（本次事故：`~/.bun`、`~/.cargo/bin`、pnpm 全局目录被删）。',
+].join('\n');
+
+/* 命令级护栏：命中即拦截（tool.execute.before 可用时生效） */
+const DESTRUCTIVE_VERB_RE =
+  /\b(?:Remove-Item|rm|rmdir|rd|del|erase)\b[^\n]*?(?:-Recurse\b|-[a-zA-Z]*r[a-zA-Z]*(?=\s|$)|\/s\b)|\brobocopy\b[^\n]*\/MIR\b|\bmv\b[^\n]*\s-f\b/i;
+const HOME_TARGET_RE =
+  /(?:\$HOME|\$env:HOME|\$env:USERPROFILE|%USERPROFILE%|~)\s*(?:[\\/]\s*\*)?(?=[\s"';|&)]|$)|[A-Za-z]:[\\/]\s*(?=[\s"';|&)]|$)|[A-Za-z]:\\Users\\[^\\\s"']+\s*(?=[\s"';|&)]|$)/i;
+const PROTECTED_PATH_RE =
+  /(?:^|[\\/\s"'=])(?:\.ssh|\.gnupg|\.config|\.cargo|\.rustup|\.bun|\.local|AppData|Program\s+Files|Windows|System32)(?:[\\/"'\s]|$)/i;
+const SHELL_TOOLS = new Set(['bash', 'shell', 'terminal', 'pwsh', 'powershell']);
+
+const detectDangerousCommand = (tool, args) => {
+  if (!SHELL_TOOLS.has(String(tool || '').toLowerCase())) return null;
+  const cmd = String((args && (args.command || args.cmd || args.script)) || '');
+  if (!cmd) return null;
+  if (!DESTRUCTIVE_VERB_RE.test(cmd)) return null;
+  if (HOME_TARGET_RE.test(cmd)) return `目标命中用户主目录/盘根：${cmd.slice(0, 200)}`;
+  if (PROTECTED_PATH_RE.test(cmd)) return `目标命中受保护目录：${cmd.slice(0, 200)}`;
+  return null;
+};
+
 /* 独占模式 agent：自带主 agent 流程（prompt），不套用常规开发路由注入，避免子技能全文劫持模式流程 */
 const EXCLUSIVE_AGENTS = new Set(['goal', 'cluster', 'penetration']);
 
@@ -1093,6 +1127,11 @@ const pickModel = (models, candidates, { preference = 'balanced', domain, multim
 };
 
 const CLUSTER_COMMON_RULES = `## 通用合规层（所有 Cluster Subagent 必须遵守，缺任何一项不得说"完成"）
+
+### 安全红线（最高优先级）
+- 禁止对 \`$HOME\`/\`~\`/\`%USERPROFILE%\`/盘根执行递归删除或覆盖；删除前先打印解析后的绝对路径。
+- 禁止删除 \`.ssh\`/\`.config\`/\`.cargo\`/\`.rustup\`/\`.bun\`/\`.local\`/\`AppData\`/\`Program Files\`/\`.git\`；需要清理时让用户手动执行。
+- 只清理明确的项目内产物，先列目标再删。
 
 ### 完成清单（必须项）
 - [ ] 动手前已做远程更新预检：git fetch + 查上游提交/CHANGELOG/issue，确认上游未实现/未修复才自研（已实现 → 提示用户改用上游并停止该任务块）
@@ -2454,6 +2493,8 @@ export default Plugin.define({
           }
         }
 
+        // 安全护栏每轮都注入（system 不持久，只在当轮有效）
+        injections.unshift(SAFETY_RULES);
         if (injections.length) pendingSystemInjections.set(sid, injections.join('\n\n'));
         else pendingSystemInjections.delete(sid);
       } catch (e) {
@@ -2477,12 +2518,27 @@ export default Plugin.define({
     /* ---- 5. 压缩钩子：注入记忆上下文 ---- */
     await ctx.session.hook('compaction', (event) => {
       try {
+        event.system.push({ type: 'text', text: SAFETY_RULES });
         const context = buildCompactionContext(projectDir);
         if (context) event.system.push({ type: 'text', text: context });
       } catch {
         // 压缩注入失败不阻塞
       }
     });
+
+    /* ---- 5b. 命令级护栏：递归删除主目录/受保护目录直接拦截 ---- */
+    try {
+      await ctx.session.hook('tool.execute.before', (input, output) => {
+        const hit = detectDangerousCommand(input && input.tool, output && output.args);
+        if (hit) {
+          throw new Error(
+            `[junsi-dev-toolkit 安全护栏] 已拦截危险命令（${hit}）。请改为明确的项目内子目录，或让用户手动执行。`
+          );
+        }
+      });
+    } catch (e) {
+      jlog(`命令护栏注册失败（仅提示词护栏生效）: ${e && e.message ? e.message : e}`, 'warn');
+    }
 
     /* ---- 6. session.idle：记忆骨架 + Goal 自驱续跑 ---- */
     let goalIdleContinueBroken = false;
