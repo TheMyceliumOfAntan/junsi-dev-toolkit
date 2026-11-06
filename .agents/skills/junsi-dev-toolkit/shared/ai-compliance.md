@@ -6,6 +6,16 @@
 
 用户对你的方案/计划说"改一下"时：先停 → 更新方案 → 问确认 → 再改。跳过 = 违规。
 
+## 分支纪律（git checkpoint）
+
+- checkpoint 一律提交在**当前工作分支**，禁止为备份新建、切换或 stash 到别的分支。
+- 开工前记录基线分支（`git rev-parse --abbrev-ref HEAD`）。
+- **收尾必须回到基线分支**，不得把用户留在 `fix/`、`feat/` 工作分支上：
+  - 走 PR：合并后 `git checkout <base> && git pull --ff-only && git branch -d <work>`
+  - 不走 PR：`git checkout <base> && git merge --ff-only <work> && git branch -d <work>`
+  - PR 未合并：明确报告当前分支、PR 链接与合并后如何切回。
+- 收尾回复必须报告当前分支与合并结果。
+
 ## 验证输出规范
 
 说"验证通过"时，必须：

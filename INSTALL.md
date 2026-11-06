@@ -117,6 +117,7 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 - 你回复「开始 / 开干 / 确认」→ 自动放行 `implement`，AI 必须先 `git checkpoint` 并贴出 hash。
 - 干活中途补充：细节纠正（字段名/文案/路径）直接继续；新增功能/改行为会打回 `clarify` 重新出方案。
 - 想换流程（比如从 RDD 切到 Bug 修复）：直接说「**切换路由**」，路由锁只对当前会话生效。
+- **分支收尾**：checkpoint 只提交在当前分支；开工记录基线（`main`/`master`）。收尾时走 PR 的项目合并后自动切回基线并 pull、删除已合并工作分支；不走 PR 的项目本地 `merge --ff-only` 回基线。PR 未合并会明确告诉你分支名和链接，不会把你丢在 `fix/`、`feat/` 分支上。
 
 ## 验证
 

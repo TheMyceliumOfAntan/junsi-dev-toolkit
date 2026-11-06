@@ -17,6 +17,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { pathToFileURL } from 'url';
 
 const repoDir = path.resolve(process.argv[2] || process.cwd());
@@ -51,6 +52,12 @@ fs.writeFileSync(path.join(stubDir, 'index.js'), 'export const Plugin = { define
 
 const projectDir = path.join(harness, 'project');
 fs.mkdirSync(projectDir, { recursive: true });
+
+/* 分支纪律依赖真实 git 仓库 */
+const git = (...args) => execFileSync('git', args, { cwd: projectDir, stdio: 'ignore' });
+git('init', '-q');
+git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '--allow-empty', '-m', 'init', '-q');
+const branchName = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: projectDir, encoding: 'utf8' }).trim();
 
 const mod = await import(pathToFileURL(path.join(pluginDir, 'junsi-dev-toolkit.js')).href);
 const def = mod.default;
@@ -156,6 +163,8 @@ console.log('\n== 2. 用户说「开始」→ implement ==');
   check(hasPhase(injected, 'implement'), '注入 IMPLEMENT 门禁横幅');
   check(injected.includes('git -c commit.gpgsign=false commit'), '横幅提示 checkpoint 命令');
   check(sessionState('s1')?.phase === 'implement', '状态文件 phase=implement');
+  check(sessionState('s1')?.baseBranch === branchName, `记录基线分支 ${branchName}`);
+  check(injected.includes('禁止为备份新建/切换分支'), '横幅提示 checkpoint 不建分支');
 }
 
 console.log('\n== 3. 干活中补充同类问题（报错）→ 不抢锁 ==');
@@ -211,12 +220,18 @@ console.log('\n== 8. rdd-phase 状态迁移 ==');
   const planOut = await run('plan');
   check(sessionState('s3')?.phase === 'plan-pending', 'plan → plan-pending');
   check(planOut.includes('等用户'), 'plan 返回等待确认提示');
-  await run('start');
+  const startOut = await run('start');
   check(sessionState('s3')?.phase === 'implement', 'start → implement');
-  await run('done');
+  check(sessionState('s3')?.baseBranch === branchName, 'start 记录基线分支');
+  check(startOut.includes('不要为备份新建分支'), 'start 返回分支纪律');
+  const doneOut = await run('done');
   check(sessionState('s3')?.phase === 'verify', 'done → verify');
+  check(doneOut.includes('收尾必须回基线分支'), 'done 返回收尾分支指令');
   const status = await run('status');
   check(status.includes('verify'), 'status 返回当前阶段');
+  const { injected } = await send('s3', '继续');
+  check(injected.includes('收尾分支纪律'), 'VERIFY 横幅含收尾分支纪律');
+  check(injected.includes(`当前分支：\`${branchName}\``), 'VERIFY 横幅显示当前分支');
 }
 
 console.log('\n== 9. 旧格式 route-state.json 不生效 ==');

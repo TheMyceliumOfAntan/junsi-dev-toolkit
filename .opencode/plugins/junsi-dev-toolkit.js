@@ -19,6 +19,7 @@
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { Plugin } from '@opencode/plugin';
 
@@ -197,6 +198,7 @@ const RDD_PHASE_BANNER = {
     '## ✅ 阶段门禁：IMPLEMENT（已放行）',
     '方案已确认，可以改代码。',
     '- 开工第一步：`git -c commit.gpgsign=false commit -m "checkpoint: ..."`，回复里贴出 commit hash。',
+    '- **checkpoint 一律提交在当前分支，禁止为备份新建/切换分支。**',
     '- 只做方案内的改动；超出范围立即停下回到 CLARIFY。',
     '- 中途补充：细节纠正（字段名/文案/路径）可直接并入；范围变更（新增功能/改行为）必须更新方案并等确认。',
   ],
@@ -204,6 +206,7 @@ const RDD_PHASE_BANNER = {
     '## ✅ 阶段门禁：VERIFY（收尾验证）',
     '只做验证与收尾：lint/typecheck/build/test 实际运行并粘贴输出，影响分析，意图逐条比对。',
     '**禁止**新增功能。全部通过 → `store-decision`（如涉及选型）→ project-docs 写回 → `save-progress`。',
+    '- **收尾分支纪律**：完成后必须回到基线分支，不得把用户留在 fix/feat 工作分支上（详见下方分支信息）。',
   ],
 };
 
@@ -325,16 +328,62 @@ const readRouteState = (projectDir, sessionID) => {
   return st;
 };
 
-const writeRouteState = (projectDir, sessionID, { route, phase }) => {
+const writeRouteState = (projectDir, sessionID, { route, phase, baseBranch }) => {
   const data = readRouteStateFile(projectDir);
   const state = {
     route,
     phase: phase || 'n/a',
+    ...(baseBranch ? { baseBranch } : {}),
     updatedAt: new Date().toISOString(),
   };
   data.sessions[sessionID || ''] = state;
   writeRouteStateFile(projectDir, data);
   return state;
+};
+
+const currentGitBranch = (dir) => {
+  try {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf8',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+};
+
+/* 基线分支 = 仓库默认分支（main/master），不是"当前所在分支"，
+   避免上一轮遗留的 fix/feat 分支被误当成基线 */
+const defaultGitBranch = (dir) => {
+  const run = (args) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  try {
+    const ref = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (ref) return ref.replace(/^origin\//, '');
+  } catch {}
+  for (const b of ['main', 'master']) {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`], {
+        cwd: dir,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      return b;
+    } catch {}
+  }
+  return currentGitBranch(dir);
+};
+
+/* 基线分支只在首次放行实现时记录（此时工作分支通常还没建） */
+const setRouteBaseBranch = (projectDir, sessionID, branch) => {
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID || ''];
+  if (!st || !branch || st.baseBranch) return st || null;
+  st.baseBranch = branch;
+  writeRouteStateFile(projectDir, data);
+  return st;
 };
 
 /* 滑动续期：锁被命中时刷新时间戳 */
@@ -835,8 +884,13 @@ const registerRddTools = async (tools) => {
         return `当前会话路由为 \`${state.route}\`，不是 requirements-driven-dev，无需阶段门禁。`;
       }
       const phase = state.phase || 'clarify';
+      const branch = currentGitBranch(projectDir);
+      const base = state.baseBranch || '';
+      const branchLine = branch
+        ? `\n- 当前分支：\`${branch}\`${base && base !== branch ? `｜基线：\`${base}\`` : ''}`
+        : '';
       if (args.action === 'status') {
-        return `当前阶段：\`${phase}\`\n\n${buildPhaseBanner(phase)}`;
+        return `当前阶段：\`${phase}\`${branchLine}\n\n${buildPhaseBanner(phase)}`;
       }
       if (args.action === 'plan') {
         if (phase === 'implement') {
@@ -850,11 +904,12 @@ const registerRddTools = async (tools) => {
         if (phase === 'clarify') {
           return '⚠️ 当前还是 CLARIFY：尚未提交完整方案。请先输出完整方案并调用 rdd-phase(action:"plan")，等用户确认后再 start。';
         }
+        if (branch) setRouteBaseBranch(projectDir, sid, defaultGitBranch(projectDir) || branch);
         setRoutePhase(projectDir, sid, 'implement');
-        return '✅ 已放行：IMPLEMENT。第一步执行 `git -c commit.gpgsign=false commit -m "checkpoint: ..."` 并在回复里贴出 commit hash，然后按方案最小改动实施。';
+        return `✅ 已放行：IMPLEMENT（基线分支 \`${branch || '未知'}\`）。第一步执行 \`git -c commit.gpgsign=false commit -m "checkpoint: ..."\` 并在回复里贴出 commit hash，然后按方案最小改动实施。checkpoint 只提交在当前分支，不要为备份新建分支。`;
       }
       setRoutePhase(projectDir, sid, 'verify');
-      return '✅ 已进入 VERIFY：实际运行 lint/typecheck/build/test 并粘贴输出，做影响分析与意图比对；全部通过后调用 project-docs 写回 + save-progress。';
+      return `✅ 已进入 VERIFY${branchLine}：实际运行 lint/typecheck/build/test 并粘贴输出，做影响分析与意图比对；全部通过后调用 project-docs 写回 + save-progress。\n收尾必须回基线分支：PR 项目 → 合并 PR 后 \`git checkout ${base || '<base>'} && git pull --ff-only && git branch -d ${branch || '<work>'}\`；不走 PR 的项目 → \`git checkout ${base || '<base>'} && git merge --ff-only ${branch || '<work>'} && git branch -d ${branch || '<work>'}\`。`;
     },
   });
 };
@@ -1041,7 +1096,8 @@ const CLUSTER_COMMON_RULES = `## 通用合规层（所有 Cluster Subagent 必�
 
 ### 完成清单（必须项）
 - [ ] 动手前已做远程更新预检：git fetch + 查上游提交/CHANGELOG/issue，确认上游未实现/未修复才自研（已实现 → 提示用户改用上游并停止该任务块）
-- [ ] 修改前已 checkpoint（git commit 或 stash）
+- [ ] 修改前已 checkpoint（git commit 或 stash），checkpoint 只提交在当前分支，禁止为备份新建/切换分支
+- [ ] 收尾已回到基线分支（PR 合并后切回 main 并 pull；不走 PR 的项目本地 merge 回 main），未把用户留在 fix/feat 分支
 - [ ] Build/测试通过（实际运行命令并粘贴输出）
 - [ ] 原始场景复测通过（如适用）
 - [ ] 调试日志已清理
@@ -2316,6 +2372,29 @@ export default Plugin.define({
               }
 
               if (phase !== prevPhase) setRoutePhase(projectDir, sid, phase);
+
+              // 分支纪律：记录基线分支，收尾时提示合并/切回
+              const branchNow = currentGitBranch(projectDir);
+              if (phase === 'implement' && branchNow) {
+                setRouteBaseBranch(projectDir, sid, defaultGitBranch(projectDir) || branchNow);
+              }
+              if ((phase === 'implement' || phase === 'verify') && branchNow) {
+                const base = (readRouteState(projectDir, sid) || {}).baseBranch || '';
+                if (phase === 'verify') {
+                  phaseNotes.push(
+                    branchNow === base
+                      ? `- 当前分支：\`${branchNow}\`（基线，无需切换）。收尾回复里报告"已在基线分支 ${branchNow}"。`
+                      : `- 当前分支：\`${branchNow}\`，基线分支：\`${base || '未知'}\`。收尾必须回基线：PR 项目 → 开 PR，合并后 \`git checkout ${base || '<base>'} && git pull --ff-only && git branch -d ${branchNow}\`；不走 PR 的项目 → \`git checkout ${base || '<base>'} && git merge --ff-only ${branchNow} && git branch -d ${branchNow}\`。PR 未合并时明确报告分支名与 PR 链接，禁止静默留在工作分支。`
+                  );
+                } else {
+                  phaseNotes.push(
+                    base && base !== branchNow
+                      ? `- 当前分支：\`${branchNow}\`，基线：\`${base}\`。checkpoint 提交在当前工作分支；收尾要回基线。`
+                      : `- 当前分支：\`${branchNow}\`（基线）。checkpoint 就提交在这里，不要为备份新建分支。`
+                  );
+                }
+              }
+
               injections.push(buildRouteInjection(route, skillsDir));
               injections.push(buildPhaseBanner(phase, phaseNotes));
             } else if (route) {
