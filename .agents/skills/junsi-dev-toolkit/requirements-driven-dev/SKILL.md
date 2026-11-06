@@ -135,6 +135,14 @@ git add -A && git -c commit.gpgsign=false commit -m "checkpoint: <本次改动�
 - 回复里**贴出 commit hash**。没贴 hash = 没做 checkpoint = 违规。
 - 工作区干净无变更时，记录 `git rev-parse HEAD` 作为回滚基线。
 - 步骤失败需要回滚：`git reset --hard <checkpoint-hash>`。
+- **checkpoint 只提交在当前分支**：禁止为了备份新建、切换或 stash 到别的分支。
+
+### 2.1.1 分支纪律（开工先记基线）
+
+1. 开工前记录基线分支：`git rev-parse --abbrev-ref HEAD`（通常 `main`/`master`）。插件也会在放行时自动记进 `route-state.json`。
+2. 需要走 PR 的项目：从基线切工作分支（`fix/xxx`、`feat/xxx`），**全程在这个分支上 checkpoint**。
+3. 不走 PR / 直接推的项目：直接在基线分支上干活，checkpoint 就是普通提交。
+4. 无论哪种，**收尾都必须回到基线分支**，见 3.5。
 
 ### 2.2 拆成原子步骤
 按方案拆步骤，每步可独立 build/测试。维护 todo 列表，同一时间只有一个 `in_progress`，验证通过才 `completed`。
@@ -173,6 +181,22 @@ git add -A && git -c commit.gpgsign=false commit -m "checkpoint: <功能名> 实
 逐条对比 Phase 1 澄清与最终结果，不符合就修。
 
 ### 3.5 收尾（缺一不可）
+
+**先回基线分支，再保存进度。**
+
+- **走 PR 的项目**：推送工作分支 → 开 PR → 合并后
+  ```bash
+  git checkout <base> && git pull --ff-only && git branch -d <work>
+  ```
+  PR 因审查未合并时：**明确报告**当前所在分支、PR 链接、合并后如何切回，禁止静默把用户留在工作分支。
+- **不走 PR / 直接推的项目**：
+  ```bash
+  git checkout <base> && git merge --ff-only <work> && git branch -d <work>
+  ```
+  已在基线分支上干活则跳过合并，直接确认 `git status` 干净。
+- 收尾回复必须报告：**当前分支**、是否已回到基线、工作分支是否已删除。
+
+然后依次调用：
 - `store-decision`（涉及选型时）
 - project-docs 的 `update_doc`/`create_adr`（涉及 API/架构/UI/行为变更）
 - `save-progress`（阶段填 `VERIFY`，会同时解锁本会话路由）
@@ -182,6 +206,8 @@ git add -A && git -c commit.gpgsign=false commit -m "checkpoint: <功能名> 实
 - [ ] 方案经用户明确确认（有「开始」）
 - [ ] IMPLEMENT 前 checkpoint 已提交并贴出 hash
 - [ ] VERIFY 前 checkpoint 已提交并贴出 hash
+- [ ] checkpoint 全部在当前工作分支，没有为备份另建分支
+- [ ] 已回到基线分支（PR 合并后切回并 pull / 本地 merge 回 main），工作分支已删除或已说明未合并原因
 - [ ] Lint / Typecheck / Build 实际运行通过（粘贴输出）
 - [ ] 现有测试全部通过（粘贴输出）
 - [ ] 测试场景已提议并验证
@@ -196,6 +222,8 @@ git add -A && git -c commit.gpgsign=false commit -m "checkpoint: <功能名> 实
 - 调研完直接开工（方案未经确认）
 - 用户提意见时边改方案边改代码
 - 跳过 checkpoint，或做了不贴 hash
+- 为 checkpoint 新建/切换分支
+- 干完把用户留在 `fix/`、`feat/` 工作分支上，不合并也不说明
 - 范围变更后不更新方案就继续写
 - Build/测试不跑就声称完成
 - 加了方案里没有的功能

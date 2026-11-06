@@ -41,7 +41,7 @@ description: Use when the user requests code migration, porting, or translation 
 ### 阶段三：准备
 
 1. 生成快照脚本，源和目标都初始化为相同测试数据集再对比
-2. 从 main 拉独立分支（`migrate/xxx`），禁止直接在 main 上改
+2. 从 main 拉独立分支（`migrate/xxx`），禁止直接在 main 上改；checkpoint 全部提交在该分支，收尾按分支纪律回 main（PR 合并后切回并 pull / 本地 `merge --ff-only`），不得把用户留在 `migrate/xxx` 上
 
 ### 阶段四：原子化移植
 
