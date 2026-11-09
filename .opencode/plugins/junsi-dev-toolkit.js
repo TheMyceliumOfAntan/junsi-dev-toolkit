@@ -68,7 +68,7 @@ const SAFETY_RULES = [
   '1. **禁止**对 `$HOME` / `~` / `%USERPROFILE%` / `$env:USERPROFILE` / `$env:LOCALAPPDATA` / `$env:APPDATA` / `C:\\` / `/` / `/home` / `/Users` 及其通配符（`~\\*`、`$HOME/*`）执行递归删除、递归移动或覆盖（`Remove-Item -Recurse`、`rm -rf`、`rmdir /s`、`del /s`、`rd /s`、`robocopy /MIR`、`mv` 覆盖）。',
   '2. 删除/覆盖前必须先用 `Resolve-Path` / `realpath` 打印**解析后的绝对路径**并确认是具体子目录；路径含通配符、层级 < 3 段、或解析为空 → 停手问用户。',
   '3. **禁止删除或覆盖**：`.ssh`、`.gnupg`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`Windows`、`.git`。需要清理时让用户手动执行。',
-  '4. 禁止用变量拼接删除路径；变量可能为空时禁止执行删除（空变量 + `-Recurse` 曾导致 `$HOME` 被清空）。',
+  '4. **删除目标必须是字面路径**：禁止用变量、`Split-Path`、`Join-Path`、`..` 拼出删除目标。PowerShell 变量名大小写不敏感（`$home` = `$HOME` = `$Home`，且是只读自动变量），赋值会静默失败，真实路径在运行前不可见 —— 护栏会直接拦。',
   '5. 卸载/重装运行时或全局包（rustup / pnpm / bun / `npm i -g` / `winget uninstall`）前必须先用 `question` 问用户。',
   '6. 只清理明确的项目内产物（`./dist`、`./build`、`./node_modules`），且先列出目标再删。',
   '7. 违反以上任一条 = 立即停止并报告用户，不得自行"修复"或"清理现场"。',
@@ -80,16 +80,45 @@ const SAFETY_RULES = [
 const DESTRUCTIVE_VERB_RE =
   /\b(?:Remove-Item|rm|rmdir|rd|del|erase)\b[^\n]*?(?:-Recurse\b|-[a-zA-Z]*r[a-zA-Z]*(?=\s|$)|\/s\b)|\brobocopy\b[^\n]*\/MIR\b|\bmv\b[^\n]*\s-f\b/i;
 const HOME_TARGET_RE =
-  /(?:\$HOME|\$env:HOME|\$env:USERPROFILE|%USERPROFILE%|~)\s*(?:[\\/]\s*\*)?(?=[\s"';|&)]|$)|[A-Za-z]:[\\/]\s*(?=[\s"';|&)]|$)|[A-Za-z]:\\Users\\[^\\\s"']+\s*(?=[\s"';|&)]|$)/i;
+  /(?:\$HOME|\$env:HOME|\$env:USERPROFILE|%USERPROFILE%|~)\s*(?:[\\/]\s*\*)?(?=[\s"';|&)]|$)|[A-Za-z]:[\\/]\s*(?=[\s"';|&)]|$)|[A-Za-z]:\\Users(?:\\[^\\\s"']*)*\s*(?=[\s"';|&)]|$)/i;
+/* 删除目标是否由变量/表达式算出（真实路径运行前不可见）。
+   只看「语句开头 + 删除动词」之后的目标 token，同语句里的其它表达式不算。
+   事故（2026-11-08）：$home 赋值失败仍是 C:\Users\<user>，Split-Path $home → C:\Users，整目录被递归删除 */
+const DELETE_STMT_RE = /(?:^|[\n;|{(=&])\s*(?:Remove-Item|rm|rmdir|rd|del|erase)\b([^\n;|]*)/gi;
+const computedTarget = (cmd) => {
+  for (const m of cmd.matchAll(DELETE_STMT_RE)) {
+    const seg = m[1];
+    if (/\s-WhatIf(?!:\s*\$false)\b/i.test(seg)) continue; // 演练模式，不实际删除
+    const target = seg
+      .split(/\s+/)
+      .find((t) => /^(?:\$|\(|["']|\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/]|~)/.test(t));
+    if (target && /^(?:\$|\(|["']\s*\$|\.\.[\\/])/.test(target)) {
+      // $env:TEMP 下的清理是常见操作，不含上跳时可判定，放行（必须是 $env:，裸 $temp 是用户变量）
+      if (/^["']?\$env:(?:TEMP|TMP)[\\/]/i.test(target) && !/\.\.[\\/]/.test(target)) continue;
+      return true;
+    }
+  }
+  return false;
+};
 const PROTECTED_PATH_RE =
   /(?:^|[\\/\s"'=])(?:\.ssh|\.gnupg|\.config|\.cargo|\.rustup|\.bun|\.local|AppData|Program\s+Files|Windows|System32)(?:[\\/"'\s]|$)/i;
 const SHELL_TOOLS = new Set(['bash', 'shell', 'terminal', 'pwsh', 'powershell']);
 
+/* 命令护栏是否真的注册成功。注册失败时把告警写进注入的 system 提示，不再静默降级 */
+let guardActive = false;
+const safetyRulesText = () =>
+  guardActive
+    ? SAFETY_RULES
+    : `${SAFETY_RULES}\n\n> ⚠ 命令级护栏未注册成功：本轮只有文字规则，递归删除不受命令级拦截。`;
+
 const detectDangerousCommand = (tool, args) => {
   if (!SHELL_TOOLS.has(String(tool || '').toLowerCase())) return null;
-  const cmd = String((args && (args.command || args.cmd || args.script)) || '');
+  const raw = String((args && (args.command || args.cmd || args.script)) || '');
+  if (!raw) return null;
+  const cmd = raw.replace(/[ \t]#.*$/gm, ''); // 行尾注释不参与判定
   if (!cmd) return null;
   if (!DESTRUCTIVE_VERB_RE.test(cmd)) return null;
+  if (computedTarget(cmd)) return `删除目标由变量/表达式计算，无法确认真实路径：${cmd.slice(0, 200)}`;
   if (HOME_TARGET_RE.test(cmd)) return `目标命中用户主目录/盘根：${cmd.slice(0, 200)}`;
   if (PROTECTED_PATH_RE.test(cmd)) return `目标命中受保护目录：${cmd.slice(0, 200)}`;
   return null;
@@ -2494,7 +2523,7 @@ export default Plugin.define({
         }
 
         // 安全护栏每轮都注入（system 不持久，只在当轮有效）
-        injections.unshift(SAFETY_RULES);
+        injections.unshift(safetyRulesText());
         if (injections.length) pendingSystemInjections.set(sid, injections.join('\n\n'));
         else pendingSystemInjections.delete(sid);
       } catch (e) {
@@ -2518,7 +2547,7 @@ export default Plugin.define({
     /* ---- 5. 压缩钩子：注入记忆上下文 ---- */
     await ctx.session.hook('compaction', (event) => {
       try {
-        event.system.push({ type: 'text', text: SAFETY_RULES });
+        event.system.push({ type: 'text', text: safetyRulesText() });
         const context = buildCompactionContext(projectDir);
         if (context) event.system.push({ type: 'text', text: context });
       } catch {
@@ -2536,7 +2565,9 @@ export default Plugin.define({
           );
         }
       });
+      guardActive = true;
     } catch (e) {
+      guardActive = false;
       jlog(`命令护栏注册失败（仅提示词护栏生效）: ${e && e.message ? e.message : e}`, 'warn');
     }
 

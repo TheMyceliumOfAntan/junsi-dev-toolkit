@@ -7,7 +7,7 @@
 - **禁止**对 `$HOME` / `~` / `%USERPROFILE%` / `$env:USERPROFILE` / `$env:LOCALAPPDATA` / `$env:APPDATA` / 盘根（`C:\`、`/`）及其通配符执行递归删除、递归移动或覆盖。
 - 删除/覆盖前必须 `Resolve-Path` / `realpath` 打印**解析后的绝对路径**，确认是具体子目录；含通配符、层级 < 3 段、解析为空 → 停手问用户。
 - **禁止删除或覆盖**：`.ssh`、`.gnupg`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`Windows`、`.git`。
-- 禁止用变量拼接删除路径；变量可能为空时禁止删除。
+- **删除目标必须是字面路径**：禁止用变量、`Split-Path`、`Join-Path`、`..` 拼出删除目标。PowerShell 变量名**不区分大小写**（`$home` = `$HOME` = `$Home`，是只读自动变量），赋值会静默失败、变量保持原值，真实路径在运行前不可见 —— 命令护栏会直接拦截。
 - 卸载/重装运行时或全局包前必须用 `question` 问用户。
 - 只清理明确的项目内产物（`./dist`、`./build`、`./node_modules`），先列目标再删。
 - 违反任一条 = 立即停止并报告，不得自行"修复现场"。

@@ -112,7 +112,8 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 
 插件每轮把硬规则注入 system 提示，并在 `tool.execute.before` 拦截危险命令：
 
-- 禁止对 `$HOME` / `~` / `%USERPROFILE%` / 盘根及其通配符递归删除或覆盖；
+- 禁止对 `$HOME` / `~` / `%USERPROFILE%` / 盘根及其通配符递归删除或覆盖（PowerShell 变量名**不区分大小写**：`$home` = `$HOME` = `$Home`，且是只读自动变量，赋值会静默失败）；
+- 删除目标必须是**字面路径**：用变量、`Split-Path`、`Join-Path`、`..` 算出来的目标一律拦截（真实路径运行前不可见）；
 - 删除前必须打印解析后的绝对路径，路径含通配符或层级过浅即停手；
 - 禁止删除 `.ssh`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`.git`；
 - 项目内 `./dist`、`./build`、`./node_modules` 的清理照常允许。

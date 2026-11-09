@@ -251,6 +251,7 @@ console.log('\n== 10. 破坏性操作护栏 ==');
 {
   const { injected } = await send('s5', '今天天气怎么样');
   check(injected.includes('破坏性操作硬规则'), '纯问答也注入安全硬规则');
+  check(injected.includes('大小写不敏感'), '安全规则写明 PowerShell 变量名不区分大小写');
   const again = await send('s5', '再问一句');
   check(again.injected.includes('破坏性操作硬规则'), '第二轮仍注入安全硬规则');
 
@@ -270,6 +271,28 @@ console.log('\n== 10. 破坏性操作护栏 ==');
   check(await blocked('Remove-Item C:\\Users\\tmoam -Recurse'), '拦截用户目录根');
   check(await blocked('Remove-Item ~/.ssh -Recurse -Force'), '拦截 .ssh');
   check(await blocked('Remove-Item ~/.cargo -Recurse'), '拦截 .cargo');
+  check(await blocked('Remove-Item -Recurse -Force C:\\Users'), '拦截裸写的 C:\\Users');
+  check(await blocked('Remove-Item C:\\Users -Recurse -Force'), '拦截 C:\\Users（-Recurse 在后）');
+  check(await blocked('Remove-Item -Recurse -Force "C:\\Users"'), '拦截带引号的 C:\\Users');
+  check(
+    await blocked('$h = Join-Path $env:TEMP "qml-shot\\home"\nRemove-Item -Recurse -Force (Split-Path $h)'),
+    '拦截 Split-Path 算出的删除目标'
+  );
+  check(await blocked('Remove-Item -Recurse -Force "$env:TEMP\\..\\..\\"'), '拦截 .. 上跳的删除目标');
+  check(!(await blocked('Remove-Item -Recurse -Force -Confirm:$false .\\dist')), '放行 -Confirm:$false 的项目内删除');
+  check(!(await blocked('Remove-Item -Recurse -WhatIf $target')), '放行 -WhatIf 演练');
+  check(!(await blocked('Remove-Item -Recurse -Force .\\dist -ErrorAction $pref')), '放行目标之外的变量');
+  check(!(await blocked('Remove-Item -Recurse -Force .\\dist   # 不要碰 $HOME')), '放行行尾注释里的变量');
+  check(
+    !(await blocked(
+      '$d = Get-ChildItem C:\\ -Directory\nforeach ($x in $d) { if ($x.FullName -eq (Split-Path $env:USERPROFILE)) { "危险" } }'
+    )),
+    '放行只检测不删除的脚本'
+  );
+  check(await blocked('Remove-Item -Recurse -Force $HoMe'), '拦截 $HoMe（变量名大小写不敏感）');
+  check(!(await blocked('Remove-Item -Recurse -Force "$env:TEMP\\qml-shot"')), '放行 $env:TEMP 下的清理');
+  check(await blocked('$temp = "D:\\evil"; Remove-Item -Recurse -Force "$temp\\x"'), '拦截 $temp 拼出的目标（不是 $env:TEMP）');
+  check(await blocked('Remove-Item -Recurse -Force "$env:USERPROFILE\\x"'), '拦截 $env:USERPROFILE 下的删除');
   check(!(await blocked('Remove-Item .\\node_modules -Recurse -Force')), '放行项目内 node_modules');
   check(!(await blocked('rm -rf ./dist')), '放行项目内 dist');
   check(!(await blocked('ls ~/.cargo')), '普通读取不拦截');
