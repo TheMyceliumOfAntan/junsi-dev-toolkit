@@ -121,6 +121,8 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 
 > 建议同时在 `~/.config/opencode/AGENTS.md` 写一份同样的规则（本机已写入），双保险。
 
+> ⚠️ **配置合并坑**：若同时存在 `~/.config/opencode/opencode.json` 和 `$OPENCODE_CONFIG_DIR/opencode.json`，两份都会加载，且 `plugins` 数组是**整组覆盖**（后者覆盖前者），不会合并。两边必须写同一份插件列表，否则插件会静默消失。用 `opencode debug config` 查看生效的 `plugins`。
+
 ## RDD 阶段门禁（新功能开发）
 
 `requirements-driven-dev` 由插件按会话记录阶段：`clarify → plan-pending → implement → verify`。
