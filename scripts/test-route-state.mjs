@@ -56,7 +56,7 @@ fs.mkdirSync(projectDir, { recursive: true });
 /* 分支纪律依赖真实 git 仓库 */
 const git = (...args) => execFileSync('git', args, { cwd: projectDir, stdio: 'ignore' });
 git('init', '-q');
-git('-c', 'user.email=test@test', '-c', 'user.name=test', 'commit', '--allow-empty', '-m', 'init', '-q');
+git('-c', 'user.email=test@test', '-c', 'user.name=test', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'init', '-q');
 const branchName = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: projectDir, encoding: 'utf8' }).trim();
 
 const mod = await import(pathToFileURL(path.join(pluginDir, 'junsi-dev-toolkit.js')).href);
@@ -90,6 +90,10 @@ const ctx = {
     },
   },
   tool: {
+    hook: async (name, cb) => {
+      hooks.set(name, cb);
+      return { dispose: async () => {} };
+    },
     transform: async (cb) => {
       const editor = {
         add: (item) => tools.set(item.name, item),
@@ -146,6 +150,17 @@ const send = async (sid, text) => {
 };
 
 const hasPhase = (injected, phase) => injected.includes(`阶段门禁：${phase.toUpperCase()}`);
+
+/* V2 真实路径：不调 prompt 钩子，只给 context 传 messages */
+const sendV2 = async (sid, text, id) => {
+  const ctxEv = {
+    sessionID: sid,
+    system: [],
+    messages: [{ id: id || `msg_${sid}_${text.length}`, role: 'user', content: [{ type: 'text', text }] }],
+  };
+  await contextHook(ctxEv);
+  return ctxEv.system.map((s) => s.text || '').join('\n');
+};
 
 console.log('\n== 1. 新需求首条 → RDD / clarify ==');
 {
@@ -256,11 +271,18 @@ console.log('\n== 10. 破坏性操作护栏 ==');
   const again = await send('s5', '再问一句');
   check(again.injected.includes('破坏性操作硬规则'), '第二轮仍注入安全硬规则');
 
-  const guard = hooks.get('tool.execute.before');
-  check(Boolean(guard), 'tool.execute.before 护栏已注册');
+  const guard = hooks.get('execute.before');
+  check(Boolean(guard), 'tool.execute.before → execute.before 已注册');
   const blocked = async (cmd) => {
     try {
-      await guard({ tool: 'bash', sessionID: 's5', callID: 'c1' }, { args: { command: cmd } });
+      await guard({
+        tool: 'bash',
+        sessionID: 's5',
+        agent: 'build',
+        messageID: 'm1',
+        id: 'c1',
+        input: { command: cmd },
+      });
       return false;
     } catch {
       return true;
@@ -305,6 +327,18 @@ console.log('\n== 10. 破坏性操作护栏 ==');
     '放行 WriteAllText 显式 UTF-8'
   );
   check(!(await blocked('Get-Content README.md -TotalCount 5')), '放行读取 .md');
+}
+
+console.log('\n== 11. V2 钩子路径（只走 context） ==');
+{
+  const first = await sendV2('s7', '帮我加个注册页', 'msg_7_1');
+  check(first.includes('路由：`requirements-driven-dev`'), '仅 context 钩子也能注入路由');
+  check(first.includes('破坏性操作硬规则'), '仅 context 钩子也注入安全规则');
+  check(hasPhase(first, 'clarify'), '仅 context 钩子也注入阶段门禁');
+
+  const dup = await sendV2('s7', '帮我加个注册页', 'msg_7_1');
+  check(dup.includes('破坏性操作硬规则'), '同一 messageID 仍注入安全规则');
+  check(!dup.includes('路由：`requirements-driven-dev`'), '同一 messageID 不重复计算路由');
 }
 
 fs.rmSync(harness, { recursive: true, force: true });

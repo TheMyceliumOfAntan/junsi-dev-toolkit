@@ -2369,10 +2369,9 @@ export default Plugin.define({
     const seenSessions = new Set();
     // 注入内容不写回用户消息，改由 context 钩子追加到 system 提示，避免污染用户输入。
     const pendingSystemInjections = new Map();
-    await ctx.session.hook('prompt', async (event) => {
+    /* 路由/阶段/记忆注入的计算体。V2 里 prompt 钩子未必触发，由 context 兜底调用 */
+    const buildSessionInjections = async (sid, text) => {
       try {
-        const sid = event.sessionID;
-        const text = (event.prompt && event.prompt.text) || '';
         const userText = text.toLowerCase();
         const isFirst = !seenSessions.has(sid);
         seenSessions.add(sid);
@@ -2527,43 +2526,92 @@ export default Plugin.define({
           }
         }
 
-        // 安全护栏每轮都注入（system 不持久，只在当轮有效）
-        injections.unshift(safetyRulesText());
-        if (injections.length) pendingSystemInjections.set(sid, injections.join('\n\n'));
-        else pendingSystemInjections.delete(sid);
+        return injections.join('\n\n');
       } catch (e) {
         jlog(`路由注入失败: ${e && e.message ? e.message : e}`, 'warn');
+        return '';
       }
-    });
+    };
 
-    /* ---- 4b. 系统提示注入（context 钩子：追加到 system，不污染用户消息） ---- */
-    await ctx.session.hook('context', (event) => {
+    /* ---- 4. 钩子注册：每个钩子独立，一个死钩子不能拖垮其它（含命令护栏） ---- */
+    const registerHook = async (label, register) => {
       try {
-        const pending = pendingSystemInjections.get(event.sessionID);
-        if (pending) {
-          event.system.push({ type: 'text', text: pending });
-          pendingSystemInjections.delete(event.sessionID);
-        }
+        await register();
+        return true;
       } catch (e) {
-        jlog(`系统提示注入失败: ${e && e.message ? e.message : e}`, 'warn');
+        jlog(`${label} 钩子注册失败: ${e && e.message ? e.message : e}`, 'warn');
+        return false;
       }
-    });
+    };
+
+    const lastHandledUser = new Map();
+    const userTextOf = (msg) =>
+      (msg && msg.content ? [].concat(msg.content) : [])
+        .filter((p) => p && p.type === 'text')
+        .map((p) => p.text || '')
+        .join('\n');
+    const lastUserOf = (messages) => {
+      const list = messages || [];
+      for (let i = list.length - 1; i >= 0; i--) if (list[i] && list[i].role === 'user') return list[i];
+      return null;
+    };
+    const stage = async (sid, text) => {
+      const out = await buildSessionInjections(sid, text);
+      if (out) pendingSystemInjections.set(sid, out);
+      else pendingSystemInjections.delete(sid);
+    };
+
+    /* prompt 钩子在 V2 运行时未必触发，保留作兼容层；失败不影响 context 兜底 */
+    await registerHook('prompt', () =>
+      ctx.session.hook('prompt', async (event) => {
+        const sid = event.sessionID;
+        const text = (event.prompt && event.prompt.text) || '';
+        lastHandledUser.set(sid, `p:${text}`);
+        await stage(sid, text);
+      })
+    );
+
+    /* ---- 4b. 系统提示注入（context 钩子：V2 真实生效路径，从 messages 取用户输入） ---- */
+    await registerHook('context', () =>
+      ctx.session.hook('context', async (event) => {
+        try {
+          const sid = event.sessionID;
+          const msg = lastUserOf(event.messages);
+          const text = userTextOf(msg);
+          const key = msg ? `m:${msg.id || text}` : '';
+          // prompt 已暂存 → 直接消费；否则在此计算（V2 主路径）
+          if (!pendingSystemInjections.has(sid) && text && lastHandledUser.get(sid) !== key) {
+            lastHandledUser.set(sid, key);
+            await stage(sid, text);
+          }
+          const pending = pendingSystemInjections.get(sid);
+          pendingSystemInjections.delete(sid);
+          const parts = [safetyRulesText()];
+          if (pending) parts.push(pending);
+          event.system.push({ type: 'text', text: parts.join('\n\n') });
+        } catch (e) {
+          jlog(`系统提示注入失败: ${e && e.message ? e.message : e}`, 'warn');
+        }
+      })
+    );
 
     /* ---- 5. 压缩钩子：注入记忆上下文 ---- */
-    await ctx.session.hook('compaction', (event) => {
-      try {
-        event.system.push({ type: 'text', text: safetyRulesText() });
-        const context = buildCompactionContext(projectDir);
-        if (context) event.system.push({ type: 'text', text: context });
-      } catch {
-        // 压缩注入失败不阻塞
-      }
-    });
+    await registerHook('compaction', () =>
+      ctx.session.hook('compaction', (event) => {
+        try {
+          event.system.push({ type: 'text', text: safetyRulesText() });
+          const context = buildCompactionContext(projectDir);
+          if (context) event.system.push({ type: 'text', text: context });
+        } catch {
+          // 压缩注入失败不阻塞
+        }
+      })
+    );
 
     /* ---- 5b. 命令级护栏：递归删除主目录/受保护目录直接拦截 ---- */
     try {
-      await ctx.session.hook('tool.execute.before', (input, output) => {
-        const hit = detectDangerousCommand(input && input.tool, output && output.args);
+      await ctx.tool.hook('execute.before', (event) => {
+        const hit = detectDangerousCommand(event && event.tool, event && event.input);
         if (hit) {
           throw new Error(
             `[junsi-dev-toolkit 安全护栏] 已拦截危险命令（${hit}）。请改为明确的项目内子目录，或让用户手动执行。`

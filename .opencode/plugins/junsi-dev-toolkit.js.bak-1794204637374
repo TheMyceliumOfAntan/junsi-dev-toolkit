@@ -1,0 +1,2653 @@
+/**
+ * junsi-dev-toolkit plugin for OpenCode.ai (v3.5)
+ *
+ * - 代码级意图路由：关键词正则匹配用户消息，命中 → 注入**对应子技能 SKILL.md 全文** + 强制路由宣告
+ * - RDD 阶段门禁：按会话记录 clarify/plan-pending/implement/verify，方案未确认前横幅禁止改代码
+ *   （rdd-phase 工具驱动迁移；路由锁不被补充信息顶掉，仅「切换路由」可换流程）
+ * - 未匹配到开发意图（纯问答）→ 零注入（省 token）
+ * - 新会话检测 .memory/HANDOFF.md → 注入恢复指令
+ * - memory 自定义工具：store-decision / save-progress / prepare-handoff / restore-handoff / list-decisions / memory-doctor / save-preference
+ * - Cluster 模式：config hook 注入 cluster 主 agent + 5 个专精 subagent（模型按本机可用性动态降级）
+ *   + cluster-scan-models / cluster-allocation 工具（动态检测 + 分配方案，需用户确认）
+ * - 实用工具：tool-search（工具索引检索）/ cron-create（Windows 计划任务）
+ * - 决策顾问路由：advisor（权衡矩阵 + question 确认）
+ * - 浏览器自动化路由：computer-use（playwright MCP 操作闭环）
+ * - 会话压缩钩子：自动注入 .memory 索引与 HANDOFF 摘要
+ * - session.idle 钩子：空闲时自动初始化 .memory 骨架 + 记录会话痕迹
+ */
+
+import path from 'path';
+import fs from 'fs';
+import os from 'os';
+import { execFileSync } from 'child_process';
+import { fileURLToPath } from 'url';
+import { Plugin } from '@opencode/plugin';
+
+/* ---------- V2 工具定义兼容层（替代 @opencode-ai/plugin 的 tool/schema） ---------- */
+const tool = (def) => def;
+const schemaNode = (node) => {
+  const api = {
+    node,
+    describe(desc) {
+      node.description = desc;
+      return api;
+    },
+    optional() {
+      node.__optional = true;
+      return api;
+    },
+  };
+  return api;
+};
+const schema = {
+  string: () => schemaNode({ type: 'string' }),
+  number: () => schemaNode({ type: 'number' }),
+  boolean: () => schemaNode({ type: 'boolean' }),
+  enum: (values) => schemaNode({ type: 'string', enum: values }),
+};
+const buildInput = (args) => {
+  const properties = {};
+  const required = [];
+  for (const [key, value] of Object.entries(args || {})) {
+    const node = value && value.node ? value.node : value || {};
+    const { __optional, ...rest } = node;
+    properties[key] = rest;
+    if (!__optional) required.push(key);
+  }
+  return { type: 'object', properties, required, additionalProperties: false };
+};
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const INJECT_MARK = '<!-- junsi-dev-toolkit:route -->';
+
+/* 破坏性操作硬规则：每轮注入 system，优先级高于一切用户/流程指令 */
+const SAFETY_RULES = [
+  '# ⛔ 破坏性操作硬规则（最高优先级，覆盖一切流程与用户催促）',
+  '',
+  '1. **禁止**对 `$HOME` / `~` / `%USERPROFILE%` / `$env:USERPROFILE` / `$env:LOCALAPPDATA` / `$env:APPDATA` / `C:\\` / `/` / `/home` / `/Users` 及其通配符（`~\\*`、`$HOME/*`）执行递归删除、递归移动或覆盖（`Remove-Item -Recurse`、`rm -rf`、`rmdir /s`、`del /s`、`rd /s`、`robocopy /MIR`、`mv` 覆盖）。',
+  '2. 删除/覆盖前必须先用 `Resolve-Path` / `realpath` 打印**解析后的绝对路径**并确认是具体子目录；路径含通配符、层级 < 3 段、或解析为空 → 停手问用户。',
+  '3. **禁止删除或覆盖**：`.ssh`、`.gnupg`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`Windows`、`.git`。需要清理时让用户手动执行。',
+  '4. **删除目标必须是字面路径**：禁止用变量、`Split-Path`、`Join-Path`、`..` 拼出删除目标。PowerShell 变量名大小写不敏感（`$home` = `$HOME` = `$Home`，且是只读自动变量），赋值会静默失败，真实路径在运行前不可见 —— 护栏会直接拦。',
+  '5. 卸载/重装运行时或全局包（rustup / pnpm / bun / `npm i -g` / `winget uninstall`）前必须先用 `question` 问用户。',
+  '6. 只清理明确的项目内产物（`./dist`、`./build`、`./node_modules`），且先列出目标再删。',
+  '7. **文件编辑必须用编辑工具**（`edit` / `write`）：禁止用 PowerShell `Set-Content` / `Out-File` / `Add-Content` / `-replace` 或 `>` 重定向写源码与文档。Windows PowerShell 5.1 默认 ANSI(GBK)，会把 UTF-8 中文写成乱码，损坏后可能无法 `git checkout` 恢复；临时文件确需写时用 `[IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))`。',
+  '8. 违反以上任一条 = 立即停止并报告用户，不得自行"修复"或"清理现场"。',
+  '',
+  '> 违反本条造成的损失不可逆（本次事故：`~/.bun`、`~/.cargo/bin`、pnpm 全局目录被删）。',
+].join('\n');
+
+/* 命令级护栏：命中即拦截（tool.execute.before 可用时生效） */
+const DESTRUCTIVE_VERB_RE =
+  /\b(?:Remove-Item|rm|rmdir|rd|del|erase)\b[^\n]*?(?:-Recurse\b|-[a-zA-Z]*r[a-zA-Z]*(?=\s|$)|\/s\b)|\brobocopy\b[^\n]*\/MIR\b|\bmv\b[^\n]*\s-f\b/i;
+const HOME_TARGET_RE =
+  /(?:\$HOME|\$env:HOME|\$env:USERPROFILE|%USERPROFILE%|~)\s*(?:[\\/]\s*\*)?(?=[\s"';|&)]|$)|[A-Za-z]:[\\/]\s*(?=[\s"';|&)]|$)|[A-Za-z]:\\Users(?:\\[^\\\s"']*)*\s*(?=[\s"';|&)]|$)/i;
+/* 删除目标是否由变量/表达式算出（真实路径运行前不可见）。
+   只看「语句开头 + 删除动词」之后的目标 token，同语句里的其它表达式不算。
+   事故（2026-11-08）：$home 赋值失败仍是 C:\Users\<user>，Split-Path $home → C:\Users，整目录被递归删除 */
+const DELETE_STMT_RE = /(?:^|[\n;|{(=&])\s*(?:Remove-Item|rm|rmdir|rd|del|erase)\b([^\n;|]*)/gi;
+const computedTarget = (cmd) => {
+  for (const m of cmd.matchAll(DELETE_STMT_RE)) {
+    const seg = m[1];
+    if (/\s-WhatIf(?!:\s*\$false)\b/i.test(seg)) continue; // 演练模式，不实际删除
+    const target = seg
+      .split(/\s+/)
+      .find((t) => /^(?:\$|\(|["']|\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/]|~)/.test(t));
+    if (target && /^(?:\$|\(|["']\s*\$|\.\.[\\/])/.test(target)) {
+      // $env:TEMP 下的清理是常见操作，不含上跳时可判定，放行（必须是 $env:，裸 $temp 是用户变量）
+      if (/^["']?\$env:(?:TEMP|TMP)[\\/]/i.test(target) && !/\.\.[\\/]/.test(target)) continue;
+      return true;
+    }
+  }
+  return false;
+};
+const PROTECTED_PATH_RE =
+  /(?:^|[\\/\s"'=])(?:\.ssh|\.gnupg|\.config|\.cargo|\.rustup|\.bun|\.local|AppData|Program\s+Files|Windows|System32)(?:[\\/"'\s]|$)/i;
+/* PowerShell 写文件：Windows PowerShell 5.1 默认 ANSI(GBK)，UTF-8 源码/文档会被写成乱码 */
+const PS_WRITE_RE =
+  /\b(?:Set-Content|Out-File|Add-Content)\b[^\n;]*?\.(?:markdown|jsonc|json|mjs|cjs|tsx|jsx|html|yml|yaml|toml|scss|svelte|properties|gradle|psm1|ps1|kts|kt|ts|js|md|py|rs|css|vue|go|java|cs|cpp|hpp|sql|xml|sh|c|h)\b/i;
+const SHELL_TOOLS = new Set(['bash', 'shell', 'terminal', 'pwsh', 'powershell']);
+
+/* 命令护栏是否真的注册成功。注册失败时把告警写进注入的 system 提示，不再静默降级 */
+let guardActive = false;
+const safetyRulesText = () =>
+  guardActive
+    ? SAFETY_RULES
+    : `${SAFETY_RULES}\n\n> ⚠ 命令级护栏未注册成功：本轮只有文字规则，递归删除不受命令级拦截。`;
+
+const detectDangerousCommand = (tool, args) => {
+  if (!SHELL_TOOLS.has(String(tool || '').toLowerCase())) return null;
+  const raw = String((args && (args.command || args.cmd || args.script)) || '');
+  if (!raw) return null;
+  const cmd = raw.replace(/[ \t]#.*$/gm, ''); // 行尾注释不参与判定
+  if (!cmd) return null;
+  if (PS_WRITE_RE.test(cmd)) return `用 PowerShell 写源码/文档（PS 5.1 默认 GBK，UTF-8 中文会乱码）：${cmd.slice(0, 200)}`;
+  if (!DESTRUCTIVE_VERB_RE.test(cmd)) return null;
+  if (computedTarget(cmd)) return `删除目标由变量/表达式计算，无法确认真实路径：${cmd.slice(0, 200)}`;
+  if (HOME_TARGET_RE.test(cmd)) return `目标命中用户主目录/盘根：${cmd.slice(0, 200)}`;
+  if (PROTECTED_PATH_RE.test(cmd)) return `目标命中受保护目录：${cmd.slice(0, 200)}`;
+  return null;
+};
+
+/* 独占模式 agent：自带主 agent 流程（prompt），不套用常规开发路由注入，避免子技能全文劫持模式流程 */
+const EXCLUSIVE_AGENTS = new Set(['goal', 'cluster', 'penetration']);
+
+const ROUTES = [
+  {
+    id: 'cluster',
+    priority: 6,
+    skillPath: '.agents/skills/junsi-dev-toolkit/cluster/SKILL.md',
+    summary: 'Cluster 模式：主 Agent 统筹规划，按任务类型派发给不同专精模型 Subagent 并行执行',
+    keywords: ['集群', 'cluster', '多agent', '多 agent', 'agent 集群', '并行开发', '分工', '多个模型', '多模型'],
+  },
+  {
+    id: 'code-migrater',
+    priority: 5,
+    skillPath: '.agents/skills/junsi-dev-toolkit/code-migrater/SKILL.md',
+    summary: '跨语言/跨框架代码移植，先可行性评估 → 冲突矩阵 → 原子化移植 → 快照比对验证',
+    keywords: ['移植', '迁移', 'migrate', '跨语言', '跨框架', '翻译成'],
+  },
+  {
+    id: 'diagnose-before-fix',
+    priority: 4,
+    skillPath: '.agents/skills/junsi-dev-toolkit/diagnose-before-fix/SKILL.md',
+    summary: 'Bug 修复 8 步：理解 → 枚举原因 → 问方向 → 修复 → Build 验证 → 原始复测',
+    keywords: ['报错', '不对', '不工作', '返回错误', '空列表', '崩溃', '白屏', 'bug', '异常', '闪退', '全黑', '黑屏', '花屏', '卡顿', '很卡', '变卡', '很慢', '太慢', '变慢', '卡住', '没响应', '失效', '没生效', '不生效', '没反应', '无反应', '不加载', '加载不出来', '显示异常'],
+  },
+  {
+    id: 'advisor',
+    priority: 3.5,
+    skillPath: '.agents/skills/junsi-dev-toolkit/advisor/SKILL.md',
+    summary: '决策顾问：多方案权衡矩阵 → 明确推荐 + question 确认（复杂决策专用）',
+    keywords: ['advisor', '顾问', '权衡', '利弊', '方案对比', '对比方案', '选哪个', '哪个方案', '优缺点', 'compare'],
+  },
+  {
+    id: 'memory-skill',
+    priority: 3,
+    skillPath: '.agents/skills/junsi-dev-toolkit/memory-skill/SKILL.md',
+    summary: '决策记忆 / 进度保存 / HANDOFF 跨会话恢复（.memory/ 目录）',
+    keywords: ['记住这个', '记住我的', '记住一下', '记一下', '记录决策', '决策', '保存进度', '换会话', '降智', '上下文不够', '恢复进度', '有哪些决策', '决策历史', '回顾决策', '健康审计', '记忆体检'],
+  },
+  {
+    id: 'computer-use',
+    priority: 2.5,
+    skillPath: '.agents/skills/junsi-dev-toolkit/computer-use/SKILL.md',
+    summary: '计算机操作/浏览器自动化：playwright MCP 配置 + 截图→操作→验证闭环',
+    keywords: ['computer_use', 'computer use', '操作电脑', '桌面自动化', '模拟鼠标', '模拟键盘', '浏览器自动化', '控制浏览器', '自动操作浏览器'],
+  },
+  {
+    id: 'project-docs',
+    priority: 2,
+    skillPath: '.agents/skills/junsi-dev-toolkit/project-docs/SKILL.md',
+    summary: '项目知识中枢：文档管理 + 代码感知 MCP 工具（架构/API/路由/组件）',
+    keywords: ['文档', '规范', 'ADR', '架构', '设计', 'API', '组件', '项目结构', '端点', '路由'],
+  },
+  {
+    id: 'requirements-driven-dev',
+    priority: 1,
+    skillPath: '.agents/skills/junsi-dev-toolkit/requirements-driven-dev/SKILL.md',
+    summary: '新功能/改动开发三阶段：CLARIFY → IMPLEMENT → VERIFY',
+    keywords: [
+      '添加',
+      '新增',
+      '实现',
+      '加个',
+      '做一个',
+      '页面',
+      '接口',
+      '功能',
+      '需求',
+      '优化',
+      '重构',
+      'refactor',
+      '改进',
+      '精简',
+      '提速',
+      '重写',
+      '整理',
+      '规范一下',
+    ],
+  },
+];
+
+const matchRoute = (text) => {
+  const hits = [];
+  for (const route of ROUTES) {
+    const count = route.keywords.filter((kw) => text.includes(kw)).length;
+    if (count > 0) hits.push({ route, count });
+  }
+  if (!hits.length) return null;
+  hits.sort((a, b) => b.count - a.count || b.route.priority - a.route.priority);
+  return hits[0].route;
+};
+
+const stripFrontmatter = (content) => {
+  const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  return match ? match[2] : content;
+};
+
+const readSkillContent = (skillsDir, route) => {
+  try {
+    const full = fs.readFileSync(path.join(skillsDir, route.id, 'SKILL.md'), 'utf8');
+    return stripFrontmatter(full);
+  } catch {
+    return `子技能文件读取失败: ${route.id}/SKILL.md`;
+  }
+};
+
+/* ---------- RDD 阶段门禁 ---------- */
+const RDD_ROUTE = 'requirements-driven-dev';
+
+/* 用户明确放行口令（整句短确认，避免“可以吗？”之类误判） */
+const RDD_CONFIRM_RE = /^(开始|开始吧|开干|开搞|开工|动手|动手吧|确认|确认了|可以|可以了|没问题|按这个来|就这么办|照这个做|执行吧|继续吧|go ahead|ok|okay|lgtm|start)[\s!！。.,，~～]*$/i;
+/* 范围变更信号（细节纠正不算；由模型按分级规则最终判定） */
+const RDD_SCOPE_CHANGE_RE = /(再加|新增|加个|多加|还要|顺便|另外|同时|扩展|扩充|换成|改成|改需求|需求变|支持|也要)/;
+/* 用户显式要求跳过方案（仅用户主动说才算） */
+const RDD_SKIP_PLAN_RE = /(直接做|直接开干|直接动手|跳过方案|不用方案|别问了|不用确认|跳过确认)/;
+
+/* rdd-phase 工具与注入钩子共享的会话上下文（sessionID 全局唯一） */
+let lastActiveSession = '';
+
+const RDD_PHASE_BANNER = {
+  clarify: [
+    '## 🚫 阶段门禁：CLARIFY（未放行）',
+    '当前阶段为 **澄清**。只允许：读代码调研、提问、复述意图、给方案。',
+    '**禁止**：编辑/创建文件、跑构建、跑测试、写任何实现代码。',
+    '流程：澄清到零模糊 → 输出**完整实施方案** → 调用 `rdd-phase(action:"plan")` → 停下等用户明确说"开始"。',
+  ],
+  'plan-pending': [
+    '## 🚫 阶段门禁：PLAN-PENDING（等用户确认）',
+    '完整方案已提交，**正在等用户确认**。',
+    '**禁止**：任何代码改动、任何"先做一点"的试探。',
+    '用户说"开始/开干/确认"后 → 调用 `rdd-phase(action:"start")` → 先 git checkpoint 再动手。',
+    '用户提修改意见 → 更新方案，再 `rdd-phase(action:"plan")`，继续等确认。',
+  ],
+  implement: [
+    '## ✅ 阶段门禁：IMPLEMENT（已放行）',
+    '方案已确认，可以改代码。',
+    '- 开工第一步：`git -c commit.gpgsign=false commit -m "checkpoint: ..."`，回复里贴出 commit hash。',
+    '- **checkpoint 一律提交在当前分支，禁止为备份新建/切换分支。**',
+    '- 只做方案内的改动；超出范围立即停下回到 CLARIFY。',
+    '- 中途补充：细节纠正（字段名/文案/路径）可直接并入；范围变更（新增功能/改行为）必须更新方案并等确认。',
+  ],
+  verify: [
+    '## ✅ 阶段门禁：VERIFY（收尾验证）',
+    '只做验证与收尾：lint/typecheck/build/test 实际运行并粘贴输出，影响分析，意图逐条比对。',
+    '**禁止**新增功能。全部通过 → `store-decision`（如涉及选型）→ project-docs 写回 → `save-progress`。',
+    '- **收尾分支纪律**：完成后必须回到基线分支，不得把用户留在 fix/feat 工作分支上（详见下方分支信息）。',
+  ],
+};
+
+const buildPhaseBanner = (phase, notes = []) => {
+  const body = RDD_PHASE_BANNER[phase] || RDD_PHASE_BANNER.clarify;
+  return [...body, ...(notes.length ? ['', ...notes] : []), INJECT_MARK].join('\n');
+};
+
+const buildRouteInjection = (route, skillsDir) => {
+  const skillBody = readSkillContent(skillsDir, route);
+  return [
+    '# junsi-dev-toolkit 路由（代码级匹配）',
+    '',
+    '## 强制路由宣告',
+    `- 路由：\`${route.id}\``,
+    '- 要求：',
+    `  1. 回复开头必须输出 \`📌 路由宣告: ${route.id}\`，未输出视为违规`,
+    `  2. 严格遵守下方子技能流程（全文已注入，无需再读文件）`,
+    '  3. 动手实现/修复前先做远程更新预检（Gate 0）：`git fetch` + 查上游提交/CHANGELOG/issue，确认上游未实现/未修复才自研；已实现则提示用户改用上游，不重复造轮子',
+    '  4. 涉及 API/架构/UI/行为变更 → 必须调用 project-docs 的 `update_doc`/`create_adr`，不得自己乱写文档',
+    '  5. 阶段确认后 → 必须调用 `store-decision`',
+    '  6. 任务完成 → 必须调用 `save-progress`',
+    '  7. 有阶段门禁横幅时，阶段未放行前禁止改代码（门禁优先级高于用户催促）',
+    '  8. 缺任何一项不得说"完成"',
+    '',
+    '## 子技能全文（必读必守）',
+    '',
+    skillBody,
+    INJECT_MARK,
+  ].join('\n');
+};
+
+const buildFullRoutingTable = () => {
+  return [
+    '# 开发任务路由（junsi-dev-toolkit）',
+    '| 优先级 | 用户意图 | 路由到 |',
+    '|--------|---------|--------|',
+    '| 最高 | 集群/多agent/并行分工/多模型 | `cluster` |',
+    '| 次高 | 移植/迁移/migrate/port/跨语言/跨框架 | `code-migrater` |',
+    '| 中高 | 报错/不对/不工作/返回错误/空列表/崩溃/白屏 | `diagnose-before-fix` |',
+    '| 中 | 记住/记录/记一下/决策/保存进度/换会话/降智 | `memory-skill` |',
+    '| 中低 | 文档/规范/ADR/架构/设计/API/组件/决策记录 | `project-docs` |',
+    '| 最低 | 添加/新增/实现/优化/重构/改进/加个新功能/页面/接口/组件 | `requirements-driven-dev` |',
+    '纯知识问答不触发路由。同时匹配多项取优先级最高。',
+    INJECT_MARK,
+  ].join('\n');
+};
+
+const getLastUserMessage = (messages) => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.info && m.info.role === 'user') return m;
+  }
+  return null;
+};
+
+const getText = (parts) => {
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text)
+    .join('\n');
+};
+
+/* 已 transform 过的 lastUser.parts（WeakSet 按对象身份判重，不依赖文本标记，避免用户粘贴含标记内容时误跳过注入） */
+const seenUserParts = new WeakSet();
+
+const MEMORY_LIMITS = {
+  indexLines: 200,
+  indexBytes: 25 * 1024,
+  handoffBytes: 12 * 1024,
+  historyMax: 20,
+  compactDecision: 3,
+  compactHandoff: 800,
+  compactPreference: 800,
+  compactIndex: 20 * 1024,
+  doctorHandoffStaleDays: 7,
+  routeStateTtlMs: 8 * 60 * 60 * 1000, // 路由锁 8 小时滑动过期（每条消息续期），避免长任务中途丢阶段
+};
+
+/* 路由状态持久化 v2：按会话隔离 + 阶段机，防止用户补充条件时路由偏离/阶段回退 */
+const ROUTE_STATE_VERSION = 2;
+const routeStatePath = (projectDir) => path.join(memoryDir(projectDir), 'route-state.json');
+
+const readRouteStateFile = (projectDir) => {
+  try {
+    const p = routeStatePath(projectDir);
+    if (!fs.existsSync(p)) return { version: ROUTE_STATE_VERSION, sessions: {} };
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    // 旧结构（顶层 activeRoute）直接作废，避免旧锁把项目卡死
+    if (!data || data.version !== ROUTE_STATE_VERSION || typeof data.sessions !== 'object' || !data.sessions) {
+      return { version: ROUTE_STATE_VERSION, sessions: {} };
+    }
+    return data;
+  } catch {
+    return { version: ROUTE_STATE_VERSION, sessions: {} };
+  }
+};
+
+const writeRouteStateFile = (projectDir, data) => {
+  try {
+    const mem = memoryDir(projectDir);
+    fs.mkdirSync(mem, { recursive: true });
+    fs.writeFileSync(routeStatePath(projectDir), JSON.stringify(data, null, 2), 'utf8');
+  } catch {}
+};
+
+const readRouteState = (projectDir, sessionID) => {
+  if (!sessionID) return null;
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID];
+  if (!st) return null;
+  const age = Date.now() - new Date(st.updatedAt || 0).getTime();
+  if (!st.updatedAt || age > MEMORY_LIMITS.routeStateTtlMs) {
+    delete data.sessions[sessionID];
+    writeRouteStateFile(projectDir, data);
+    return null;
+  }
+  return st;
+};
+
+const writeRouteState = (projectDir, sessionID, { route, phase, baseBranch }) => {
+  const data = readRouteStateFile(projectDir);
+  const state = {
+    route,
+    phase: phase || 'n/a',
+    ...(baseBranch ? { baseBranch } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  data.sessions[sessionID || ''] = state;
+  writeRouteStateFile(projectDir, data);
+  return state;
+};
+
+const currentGitBranch = (dir) => {
+  try {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf8',
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+};
+
+/* 基线分支 = 仓库默认分支（main/master），不是"当前所在分支"，
+   避免上一轮遗留的 fix/feat 分支被误当成基线 */
+const defaultGitBranch = (dir) => {
+  const run = (args) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  try {
+    const ref = run(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    if (ref) return ref.replace(/^origin\//, '');
+  } catch {}
+  for (const b of ['main', 'master']) {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${b}`], {
+        cwd: dir,
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+      return b;
+    } catch {}
+  }
+  return currentGitBranch(dir);
+};
+
+/* 基线分支只在首次放行实现时记录（此时工作分支通常还没建） */
+const setRouteBaseBranch = (projectDir, sessionID, branch) => {
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID || ''];
+  if (!st || !branch || st.baseBranch) return st || null;
+  st.baseBranch = branch;
+  writeRouteStateFile(projectDir, data);
+  return st;
+};
+
+/* 滑动续期：锁被命中时刷新时间戳 */
+const touchRouteState = (projectDir, sessionID) => {
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID || ''];
+  if (!st) return null;
+  st.updatedAt = new Date().toISOString();
+  writeRouteStateFile(projectDir, data);
+  return st;
+};
+
+const setRoutePhase = (projectDir, sessionID, phase) => {
+  const data = readRouteStateFile(projectDir);
+  const st = data.sessions[sessionID || ''];
+  if (!st) return null;
+  st.phase = phase;
+  st.updatedAt = new Date().toISOString();
+  writeRouteStateFile(projectDir, data);
+  return st;
+};
+
+/* sessionID 缺省时清空全部（save-progress 等工具拿不到会话时兜底） */
+const clearRouteState = (projectDir, sessionID) => {
+  try {
+    if (!sessionID) {
+      const p = routeStatePath(projectDir);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+      return;
+    }
+    const data = readRouteStateFile(projectDir);
+    if (data.sessions[sessionID]) {
+      delete data.sessions[sessionID];
+      writeRouteStateFile(projectDir, data);
+    }
+  } catch {}
+};
+
+const memoryDir = (projectDir) => path.join(projectDir, '.memory');
+const userMemoryDir = () => path.join(os.homedir(), '.config', 'opencode', '.memory');
+const readOrEmpty = (p) => {
+  try {
+    return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+  } catch {
+    return '';
+  }
+};
+
+const ensureMemoryDir = (dir) => {
+  const mem = memoryDir(dir);
+  fs.mkdirSync(path.join(mem, 'decisions'), { recursive: true });
+  fs.mkdirSync(path.join(mem, 'progress'), { recursive: true });
+  fs.mkdirSync(path.join(mem, 'progress', 'history'), { recursive: true });
+  fs.mkdirSync(path.join(mem, 'sessions'), { recursive: true });
+  return mem;
+};
+
+const ensureUserMemoryDir = () => {
+  const dir = userMemoryDir();
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+};
+
+const ensureGitignore = (dir) => {
+  const gi = path.join(dir, '.gitignore');
+  try {
+    const content = fs.existsSync(gi) ? fs.readFileSync(gi, 'utf8') : '';
+    if (!content.split('\n').some((l) => l.trim() === '.memory/')) {
+      fs.writeFileSync(gi, content.endsWith('\n') || !content ? `${content}.memory/\n` : `${content}\n.memory/\n`);
+    }
+  } catch {
+    // 忽略无 .gitignore 的项目
+  }
+};
+
+const timestamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+const slugify = (title = '') =>
+  title
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'untitled';
+
+const decisionFiles = (mem) => {
+  const d = path.join(mem, 'decisions');
+  if (!fs.existsSync(d)) return [];
+  return fs.readdirSync(d).filter((f) => f.endsWith('.md')).sort();
+};
+
+const listRecentDecisions = (mem, n = 3) => decisionFiles(mem).reverse().slice(0, n);
+
+const readDecisionTitle = (content, fallback) => {
+  const m = content.match(/^## 决策记录：(.+)$/m) || content.match(/^# 决策：(.+)$/m);
+  return m ? m[1] : fallback;
+};
+
+const measureText = (text) => {
+  const lines = text.split('\n').length;
+  const bytes = Buffer.byteLength(text, 'utf8');
+  return { lines, bytes };
+};
+
+const writeIndex = (mem, { task, stage } = {}) => {
+  const progress = readOrEmpty(path.join(mem, 'progress', 'current.md'));
+  const progressHead = progress.split('\n').slice(0, 6).join('\n').trim();
+  const progressTitle = progress.match(/^## 进度：(.+)$/m) || progress.match(/^# 进度：(.+)$/m);
+  const recent = listRecentDecisions(mem, 3).map((f) => {
+    const c = readOrEmpty(path.join(mem, 'decisions', f));
+    return `- ${readDecisionTitle(c, f.slice(0, 40))}（${f.slice(0, 10)}）`;
+  });
+  const handoffPath = path.join(mem, 'HANDOFF.md');
+  const handoff = fs.existsSync(handoffPath);
+  const goalRaw = readOrEmpty(path.join(mem, 'goals', 'active.md'));
+  const goalRoundMatch = goalRaw.match(/^- 轮次：(\d+)\/(\d+)$/m);
+  const historyCount = fs.existsSync(path.join(mem, 'progress', 'history'))
+    ? fs.readdirSync(path.join(mem, 'progress', 'history')).filter((f) => f.endsWith('.md')).length
+    : 0;
+  const taskLine = (task || (progressTitle ? progressTitle[1] : '（未命名任务）')).slice(0, 120);
+  const stageLine = stage || (progress.match(/^- 阶段：(.+)$/m) ? progress.match(/^- 阶段：(.+)$/m)[1] : '未记录');
+  const lines = [
+    '# 任务索引',
+    '',
+    `> 自动维护：${new Date().toISOString().slice(0, 10)} ｜ 超 ${MEMORY_LIMITS.indexLines} 行会被拒绝，请精简`,
+    '',
+    '## 当前任务',
+    `- 标题：${taskLine}`,
+    `- 阶段：${stageLine}`,
+    `- 最后更新：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+    '',
+    '## 进度摘要',
+    progressHead || '（无）',
+    '',
+    '## 最近决策',
+    recent.length ? recent.join('\n') : '（无）',
+    '',
+    '## 状态',
+    `- HANDOFF：${handoff ? `就绪（${new Date(fs.statSync(handoffPath).mtime).toLocaleString()}）` : '无'}`,
+    `- 活动 Goal：${goalRaw ? `${(goalRaw.match(/^# GOAL: (.+)$/m) || [])[1]}（${goalRoundMatch ? `${goalRoundMatch[1]}/${goalRoundMatch[2] === '0' ? '∞' : goalRoundMatch[2]}` : '?'} 轮）` : '无'}`,
+    `- 进度历史快照：${historyCount} 条（上限 ${MEMORY_LIMITS.historyMax}）`,
+    `- 决策总数：${decisionFiles(mem).length}`,
+    '',
+    '## 快速链接',
+    '- 决策：`.memory/decisions/`',
+    '- 进度：`.memory/progress/current.md`',
+    '- 历史：`.memory/progress/history/`',
+    '- 会话：`.memory/sessions/`',
+    '',
+  ].join('\n');
+  const { lines: nLines, bytes } = measureText(lines);
+  if (nLines > MEMORY_LIMITS.indexLines || bytes > MEMORY_LIMITS.indexBytes) {
+    return { ok: false, message: `INDEX.md 超限（${nLines} 行 / ${(bytes / 1024).toFixed(1)}KB > ${MEMORY_LIMITS.indexLines} 行 / ${(MEMORY_LIMITS.indexBytes / 1024).toFixed(0)}KB）：已拒绝写入，请精简进度摘要与决策标题后再保存` };
+  }
+  fs.writeFileSync(path.join(mem, 'INDEX.md'), lines, 'utf8');
+  return { ok: true, message: `INDEX.md 已更新（${nLines} 行 / ${(bytes / 1024).toFixed(1)}KB）` };
+};
+
+const archiveProgress = (mem) => {
+  const current = path.join(mem, 'progress', 'current.md');
+  if (!fs.existsSync(current)) return;
+  const hist = path.join(mem, 'progress', 'history');
+  fs.mkdirSync(hist, { recursive: true });
+  const content = readOrEmpty(current);
+  const title = (content.match(/^## 进度：(.+)$/m) || content.match(/^# 进度：(.+)$/m) || [])[1] || 'progress';
+  fs.writeFileSync(path.join(hist, `${timestamp()}-${slugify(title)}.md`), content, 'utf8');
+  const files = fs.readdirSync(hist).filter((f) => f.endsWith('.md')).sort();
+  while (files.length > MEMORY_LIMITS.historyMax) {
+    fs.unlinkSync(path.join(hist, files.shift()));
+  }
+};
+
+const appendSessionTrace = (mem, { task, stage, source }) => {
+  const dir = path.join(mem, 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${timestamp()}.md`);
+  const line = `- ${new Date().toISOString().slice(0, 16).replace('T', ' ')}｜${task}（${stage}）｜${source || 'save-progress'}`;
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, ['# 会话痕迹', line, ''].join('\n'), 'utf8');
+  } else {
+    fs.appendFileSync(file, `${line}\n`, 'utf8');
+  }
+};
+
+const archiveHandoff = (mem, prefix = 'handoff-done') => {
+  const f = path.join(mem, 'HANDOFF.md');
+  if (!fs.existsSync(f)) return false;
+  const dir = path.join(mem, 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const content = readOrEmpty(f);
+  const title = (content.match(/^## 任务\s*\n(.+)$/m) || [])[1] || 'handoff';
+  fs.writeFileSync(path.join(dir, `${prefix}-${timestamp()}-${slugify(title)}.md`), content, 'utf8');
+  fs.unlinkSync(f);
+  return true;
+};
+
+const registerMemoryTools = async (tools) => {
+
+  tools['store-decision'] = tool({
+    description:
+      '记录一条关键决策。默认写入项目 .memory/decisions/；scope=global 时写入用户级 ~/.config/opencode/.memory/decisions/（跨项目生效，适合通用经验/偏好型决策）。当用户说"记住/记录/记一下/方案确认/决策"时调用，或子技能在阶段确认后自动调用。',
+    args: {
+      title: schema.string().describe('决策标题'),
+      scenario: schema.string().describe('场景/上下文'),
+      decision: schema.string().describe('选了什么方案，为什么不选其他'),
+      impact: schema.string().optional().describe('影响范围（文件/模块）'),
+      scope: schema.enum(['project', 'global']).optional().describe('project=写入项目 .memory/decisions/（默认）；global=写入用户级全局记忆，跨项目生效'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      ensureGitignore(context.directory);
+      const isGlobal = args.scope === 'global';
+      const targetDir = isGlobal ? path.join(ensureUserMemoryDir(), 'decisions') : path.join(mem, 'decisions');
+      fs.mkdirSync(targetDir, { recursive: true });
+      const file = path.join(targetDir, `${timestamp()}-${slugify(args.title)}.md`);
+      const content = [
+        '## 决策记录：' + args.title,
+        '- 日期：' + new Date().toISOString().slice(0, 10),
+        '- 场景：' + args.scenario,
+        '- 方案：' + args.decision,
+        ...(args.impact ? ['- 影响范围：' + args.impact] : []),
+        ...(isGlobal ? ['- 作用域：global（跨项目生效）'] : []),
+        '',
+      ].join('\n');
+      fs.writeFileSync(file, content, 'utf8');
+      return `已记录决策: ${file}${isGlobal ? '（全局作用域，跨项目生效）' : ''}`;
+    },
+  });
+
+  tools['save-progress'] = tool({
+    description:
+      '保存任务进度到项目 .memory/progress/current.md 并更新 INDEX.md。用户说"保存进度/做到哪了/记进度"，或任务 VERIFY 通过后调用。',
+    args: {
+      task: schema.string().describe('任务标题'),
+      stage: schema.string().describe('阶段：CLARIFY/IMPLEMENT/VERIFY/中断'),
+      done: schema.string().describe('完成项（逗号分隔）'),
+      todo: schema.string().describe('待办项（逗号分隔）'),
+      next: schema.string().optional().describe('建议下一步'),
+      files: schema.string().optional().describe('涉及的关键文件（逗号分隔）'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      ensureGitignore(context.directory);
+      archiveProgress(mem);
+      const file = path.join(mem, 'progress', 'current.md');
+      const content = [
+        '## 进度：' + args.task,
+        '- 阶段：' + args.stage,
+        '- 完成项：' + args.done.split(',').map((s) => s.trim()).filter(Boolean).join('、'),
+        '- 待办项：' + args.todo.split(',').map((s) => s.trim()).filter(Boolean).join('、'),
+        ...(args.next ? ['- 下一步：' + args.next] : []),
+        ...(args.files ? ['- 关键文件：' + args.files] : []),
+        '- 更新：' + new Date().toISOString(),
+        '',
+      ].join('\n');
+      fs.writeFileSync(file, content, 'utf8');
+      const idx = writeIndex(mem, { task: args.task, stage: args.stage });
+      appendSessionTrace(mem, { task: args.task, stage: args.stage, source: 'save-progress' });
+      // 任务完成（VERIFY）时自动解锁路由，允许下次新意图重新匹配
+      if (args.stage && args.stage.toUpperCase() === 'VERIFY') {
+        clearRouteState(context.directory, context.sessionID);
+      }
+      return `进度已保存: ${file}\n${idx.message}`;
+    },
+  });
+
+  tools['prepare-handoff'] = tool({
+    description:
+      '生成跨会话 HANDOFF.md（自包含恢复包）。用户说"换会话/换窗口/上下文不够/降智/重开"，或感觉到上下文将满时调用。',
+    args: {
+      task: schema.string().describe('任务标题'),
+      status: schema.string().describe('当前状态摘要'),
+      done: schema.string().describe('已完成事项'),
+      pending: schema.string().describe('待办事项'),
+      files: schema.string().describe('关键文件列表'),
+      decisions: schema.string().optional().describe('关键决策摘要'),
+      next: schema.string().optional().describe('下一步行动'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const file = path.join(mem, 'HANDOFF.md');
+      archiveHandoff(mem, 'handoff-previous');
+      const content = [
+        '# HANDOFF',
+        '',
+        '## 任务',
+        args.task,
+        '',
+        '## 状态',
+        args.status,
+        '',
+        '## 已完成',
+        args.done,
+        '',
+        '## 待办',
+        args.pending,
+        '',
+        '## 关键文件',
+        args.files,
+        '',
+        ...(args.decisions ? ['## 关键决策', args.decisions, ''] : []),
+        ...(args.next ? ['## 下一步', args.next, ''] : []),
+        '> 新会话自动检测本文件并注入恢复指令。恢复完成后调用 `restore-handoff`（complete: true）归档并移除本文件。',
+        '',
+      ].join('\n');
+      const { lines, bytes } = measureText(content);
+      if (bytes > MEMORY_LIMITS.handoffBytes) {
+        return `HANDOFF 超限（${(bytes / 1024).toFixed(1)}KB > ${(MEMORY_LIMITS.handoffBytes / 1024).toFixed(0)}KB）：已拒绝写入，请压缩状态/待办/决策摘要后再试`;
+      }
+      fs.writeFileSync(file, content, 'utf8');
+      const idx = writeIndex(mem, { task: args.task, stage: '准备换会话' });
+      appendSessionTrace(mem, { task: args.task, stage: 'HANDOFF', source: 'prepare-handoff' });
+      return `HANDOFF 已生成: ${file}（${lines} 行 / ${(bytes / 1024).toFixed(1)}KB）\n${idx.message}`;
+    },
+  });
+
+  tools['restore-handoff'] = tool({
+    description:
+      '读取 .memory/HANDOFF.md 恢复跨会话状态。新会话检测到 HANDOFF 时由路由层自动调用；用户说"恢复进度/接着上次做"时也可调用。complete=true 表示任务确认完成，读后归档 HANDOFF 到 sessions/ 并移除活动文件。',
+    args: {
+      complete: schema.boolean().optional().describe('任务是否已完成：true=读后归档并移除 HANDOFF（防止过期恢复包误导新会话）；默认 false=仅读取'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const content = readOrEmpty(path.join(mem, 'HANDOFF.md'));
+      if (!content) return '未找到 .memory/HANDOFF.md，无待恢复任务。';
+      const result = `HANDOFF.md 内容如下，直接恢复工作状态（无需重新读代码/查结构）：\n\n${content}`;
+      if (args.complete) {
+        const archived = archiveHandoff(mem, 'handoff-done');
+        writeIndex(mem);
+        return archived ? `${result}\n\n（任务已确认完成：HANDOFF 已归档到 sessions/ 并移除，新会话不再注入）` : result;
+      }
+      return result;
+    },
+  });
+
+  tools['list-decisions'] = tool({
+    description:
+      '列出决策历史（标题+日期+摘要），按时间倒序，支持分词模糊匹配（空格分词，AND 全命中优先、OR 兜底）。scope=all 时合并项目 + 全局决策（全局标注 🌐）。用户说"有哪些决策/决策历史/回顾决策"时调用。',
+    args: {
+      keyword: schema.string().optional().describe('关键词过滤（标题或内容包含，留空列出全部）'),
+      limit: schema.number().optional().describe('最多返回条数，默认 20，最大 50'),
+      scope: schema.enum(['all', 'project', 'global']).optional().describe('all=合并项目+全局决策（默认）；project=仅项目；global=仅全局'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const scope = args.scope || 'all';
+      const globalDecDir = path.join(ensureUserMemoryDir(), 'decisions');
+      const sources = [];
+      if (scope !== 'global') sources.push({ dir: path.join(mem, 'decisions'), tag: '' });
+      if (scope !== 'project') sources.push({ dir: globalDecDir, tag: '🌐 ' });
+      const files = [];
+      for (const s of sources) {
+        if (!fs.existsSync(s.dir)) continue;
+        for (const f of fs.readdirSync(s.dir).filter((x) => x.endsWith('.md')).sort().reverse()) {
+          files.push({ f, tag: s.tag, dir: s.dir });
+        }
+      }
+      files.sort((a, b) => (a.f < b.f ? 1 : -1));
+      if (!files.length) return '尚无决策记录。';
+      const limit = Math.min(Math.max(args.limit || 20, 1), 50);
+      const tokens = (args.keyword || '').trim().toLowerCase().split(/[\s,，、;；]+/).filter(Boolean);
+      const contentOf = (src) => {
+        const c = readOrEmpty(path.join(src.dir, src.f));
+        return { c, title: readDecisionTitle(c, src.f) };
+      };
+      const matches = (hay, toks, mode) => (mode === 'or' ? toks.some((t) => hay.includes(t)) : toks.every((t) => hay.includes(t)));
+      let matched = [];
+      let mode = 'all';
+      if (tokens.length) {
+        const andHit = files.filter((src) => {
+          const { c, title } = contentOf(src);
+          return matches(`${title}\n${c}`.toLowerCase(), tokens, 'and');
+        });
+        if (andHit.length || tokens.length === 1) {
+          matched = andHit;
+          mode = tokens.length === 1 ? 'single' : 'and';
+        } else {
+          matched = files.filter((src) => {
+            const { c, title } = contentOf(src);
+            return matches(`${title}\n${c}`.toLowerCase(), tokens, 'or');
+          });
+          mode = 'or';
+        }
+      } else {
+        matched = files;
+      }
+      const out = matched.slice(0, limit).map((src) => {
+        const { c, title } = contentOf(src);
+        const head = c.split('\n').filter((l) => l.trim()).slice(0, 4).join('\n  ');
+        return `- ${src.tag}**${title}**（${src.f.slice(0, 10)}）\n  ${head}`;
+      });
+      const modeLabel = { all: '全部', single: `单词过滤（词：${tokens[0]}）`, and: `AND 全词匹配（词：${tokens.join(' / ')}）`, or: `OR 任意词匹配（AND 无结果，兜底：${tokens.join(' / ')}）` }[mode];
+      const nProject = fs.existsSync(sources[0] ? sources[0].dir : '') ? fs.readdirSync(sources[0].dir).filter((x) => x.endsWith('.md')).length : 0;
+      const nGlobal = fs.existsSync(sources[1] ? sources[1].dir : '') ? fs.readdirSync(sources[1].dir).filter((x) => x.endsWith('.md')).length : 0;
+      return out.length
+        ? `## 决策历史（显示 ${out.length} / 共 ${files.length} 条${args.keyword ? `，${modeLabel}` : ''}${scope === 'all' ? `｜项目 ${nProject} + 全局 🌐 ${nGlobal}` : ''}）\n\n${out.join('\n\n')}\n\n> 想回溯某条全文：读取对应 decisions/ 目录下的文件`
+        : `无匹配决策（关键词：${args.keyword || '空'}）。`;
+    },
+  });
+
+  tools['memory-doctor'] = tool({
+    description:
+      'memory 健康审计：检查 INDEX 大小/结构、进度文件、HANDOFF 是否过期残留、决策与会话数量、全局记忆层。用户说"健康审计/记忆体检"时调用。',
+    args: {},
+    async execute(_args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const issues = [];
+      const notes = [];
+      const check = (ok, msg) => (ok ? notes.push(`✅ ${msg}`) : issues.push(`⚠️ ${msg}`));
+
+      const idx = readOrEmpty(path.join(mem, 'INDEX.md'));
+      if (!idx) {
+        issues.push('INDEX.md 缺失（运行 save-progress 或 prepare-handoff 生成）');
+      } else {
+        const { lines, bytes } = measureText(idx);
+        check(lines <= MEMORY_LIMITS.indexLines && bytes <= MEMORY_LIMITS.indexBytes, `INDEX.md ${lines} 行 / ${(bytes / 1024).toFixed(1)}KB（上限 ${MEMORY_LIMITS.indexLines} 行 / ${(MEMORY_LIMITS.indexBytes / 1024).toFixed(0)}KB）`);
+        const hasTask = /^## 当前任务/m.test(idx) && /^- 标题：/m.test(idx);
+        check(hasTask, 'INDEX.md 结构完整（含"当前任务"）');
+        check(/^## 最近决策/m.test(idx), 'INDEX.md 含"最近决策"区块');
+      }
+
+      const progress = path.join(mem, 'progress', 'current.md');
+      check(fs.existsSync(progress), `进度文件存在（${fs.existsSync(progress) ? (measureText(readOrEmpty(progress)).bytes / 1024).toFixed(1) + 'KB' : '缺失'}）`);
+
+      const handoff = path.join(mem, 'HANDOFF.md');
+      if (fs.existsSync(handoff)) {
+        const ageDays = (Date.now() - fs.statSync(handoff).mtimeMs) / 86400000;
+        if (ageDays > MEMORY_LIMITS.doctorHandoffStaleDays) {
+          issues.push(`HANDOFF.md 已存在 ${ageDays.toFixed(1)} 天，疑似过期残留（>${MEMORY_LIMITS.doctorHandoffStaleDays} 天）：若任务已完成请调用 restore-handoff（complete: true）归档移除`);
+        } else {
+          notes.push(`HANDOFF.md 存在（${ageDays.toFixed(1)} 天前更新）`);
+        }
+      } else {
+        notes.push('无活动 HANDOFF');
+      }
+
+      const nDec = decisionFiles(mem).length;
+      notes.push(`决策 ${nDec} 条`);
+      const sDir = path.join(mem, 'sessions');
+      const nSess = fs.existsSync(sDir) ? fs.readdirSync(sDir).filter((f) => f.endsWith('.md')).length : 0;
+      notes.push(`会话记录 ${nSess} 条`);
+      const hDir = path.join(mem, 'progress', 'history');
+      const nHist = fs.existsSync(hDir) ? fs.readdirSync(hDir).filter((f) => f.endsWith('.md')).length : 0;
+      check(nHist <= MEMORY_LIMITS.historyMax, `进度历史 ${nHist} 条（上限 ${MEMORY_LIMITS.historyMax}，超出自动裁剪）`);
+
+      const up = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+      check(Boolean(up.trim()), `全局用户偏好 ${up.trim() ? '已初始化' : '未初始化（用 save-preference 写入全局偏好）'}（~/.config/opencode/.memory/）`);
+      const gDecDir = path.join(userMemoryDir(), 'decisions');
+      const nGDec = fs.existsSync(gDecDir) ? fs.readdirSync(gDecDir).filter((f) => f.endsWith('.md')).length : 0;
+      notes.push(`全局决策 ${nGDec} 条（scope=global 的 store-decision 写入）`);
+
+      const head = ['# memory 健康审计', '', `- 时间：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, `- 项目：.memory/`, '- 状态：' + (issues.length ? `${issues.length} 个问题` : '全部健康'), ''];
+      return head.concat(notes.map((n) => n + '\n'), issues.map((i) => i + '\n'), issues.length ? ['', '> 修复建议见各问题说明。'] : []).join('\n');
+    },
+  });
+
+  tools['save-preference'] = tool({
+    description:
+      '保存跨项目全局偏好到 ~/.config/opencode/.memory/preferences.md（用户级记忆，所有项目生效）。用户说"记住我的偏好/以后都用XX/默认XX"时调用。',
+    args: {
+      preference: schema.string().describe('偏好内容（一句话，可验证，如"前端项目一律用 pnpm，不用 npm"）'),
+    },
+    async execute(args, _context) {
+      const dir = ensureUserMemoryDir();
+      const file = path.join(dir, 'preferences.md');
+      const existing = readOrEmpty(file);
+      const line = `- ${new Date().toISOString().slice(0, 10)}：${args.preference.trim()}`;
+      const content = existing.trim() ? `${existing.trimEnd()}\n${line}\n` : `# 全局用户偏好\n\n> 跨项目生效，会话压缩时自动注入。避免重复条目，语义相同请合并。\n\n${line}\n`;
+      const { bytes } = measureText(content);
+      if (bytes > MEMORY_LIMITS.compactPreference * 3) {
+        return `preferences.md 已偏大（${(bytes / 1024).toFixed(1)}KB）：请合并重复条目后再追加`;
+      }
+      fs.writeFileSync(file, content, 'utf8');
+      return `已保存全局偏好: ${file}`;
+    },
+  });
+
+  return { ok: true };
+};
+
+/* ---------- RDD 阶段门禁工具 ---------- */
+
+const registerRddTools = async (tools) => {
+  tools['rdd-phase'] = tool({
+    description:
+      'requirements-driven-dev 阶段门禁。方案输出完 → plan（登记待确认）；用户明确说“开始”后 → start（放行实现）；实现完成 → done（进入验证）；status 只读。阶段未放行前禁止改代码。',
+    args: {
+      action: schema.enum(['plan', 'start', 'done', 'status']).describe('plan=方案已出待确认 / start=用户已确认放行 / done=实现完成进入验证 / status=查看当前阶段'),
+    },
+    async execute(args, context) {
+      const sid = (context && context.sessionID) || lastActiveSession || '';
+      const projectDir = (context && context.directory) || process.cwd();
+      const state = readRouteState(projectDir, sid);
+      if (!state) {
+        return '当前会话没有激活的开发路由（可能已过期或已完成）。先提出开发需求，路由激活后再用本工具。';
+      }
+      if (state.route !== RDD_ROUTE) {
+        return `当前会话路由为 \`${state.route}\`，不是 requirements-driven-dev，无需阶段门禁。`;
+      }
+      const phase = state.phase || 'clarify';
+      const branch = currentGitBranch(projectDir);
+      const base = state.baseBranch || '';
+      const branchLine = branch
+        ? `\n- 当前分支：\`${branch}\`${base && base !== branch ? `｜基线：\`${base}\`` : ''}`
+        : '';
+      if (args.action === 'status') {
+        return `当前阶段：\`${phase}\`${branchLine}\n\n${buildPhaseBanner(phase)}`;
+      }
+      if (args.action === 'plan') {
+        if (phase === 'implement') {
+          return '⚠️ 当前已是 IMPLEMENT（方案已确认）。若方案有实质变更，需先向用户说明并等确认，再调用 start；否则不要重复登记 plan。';
+        }
+        setRoutePhase(projectDir, sid, 'plan-pending');
+        return '✅ 已登记：PLAN-PENDING（方案待确认）。现在必须停下，等用户明确说“开始”后再调用 rdd-phase(action:"start")。';
+      }
+      if (args.action === 'start') {
+        if (phase === 'implement') return '已处于 IMPLEMENT，无需重复放行。开工前别忘了 git checkpoint。';
+        if (phase === 'clarify') {
+          return '⚠️ 当前还是 CLARIFY：尚未提交完整方案。请先输出完整方案并调用 rdd-phase(action:"plan")，等用户确认后再 start。';
+        }
+        if (branch) setRouteBaseBranch(projectDir, sid, defaultGitBranch(projectDir) || branch);
+        setRoutePhase(projectDir, sid, 'implement');
+        return `✅ 已放行：IMPLEMENT（基线分支 \`${branch || '未知'}\`）。第一步执行 \`git -c commit.gpgsign=false commit -m "checkpoint: ..."\` 并在回复里贴出 commit hash，然后按方案最小改动实施。checkpoint 只提交在当前分支，不要为备份新建分支。`;
+      }
+      setRoutePhase(projectDir, sid, 'verify');
+      return `✅ 已进入 VERIFY${branchLine}：实际运行 lint/typecheck/build/test 并粘贴输出，做影响分析与意图比对；全部通过后调用 project-docs 写回 + save-progress。\n收尾必须回基线分支：PR 项目 → 合并 PR 后 \`git checkout ${base || '<base>'} && git pull --ff-only && git branch -d ${branch || '<work>'}\`；不走 PR 的项目 → \`git checkout ${base || '<base>'} && git merge --ff-only ${branch || '<work>'} && git branch -d ${branch || '<work>'}\`。`;
+    },
+  });
+};
+
+/* ---------- Cluster 模式：动态模型检测 + Agent 注入 ---------- */
+
+const AUTH_PATHS = [
+  path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json'),
+  path.join(os.homedir(), '.config', 'opencode', 'auth.json'),
+  path.join(os.homedir(), '.opencode', 'auth.json'),
+];
+
+const MODELS_CACHE = path.join(os.homedir(), '.cache', 'opencode', 'models.json');
+
+const detectAuthedProviders = () => {
+  const authed = new Set();
+  for (const p of AUTH_PATHS) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      for (const [provider, v] of Object.entries(data)) {
+        if (v && (v.type === 'api' || v.key || v.token)) authed.add(provider);
+      }
+    } catch {
+      // 忽略不可读的 auth 文件
+    }
+  }
+  return authed;
+};
+
+const detectEnvProviders = () => {
+  const available = new Set();
+  try {
+    const models = JSON.parse(fs.readFileSync(MODELS_CACHE, 'utf8'));
+    for (const [provider, meta] of Object.entries(models)) {
+      const envs = meta && Array.isArray(meta.env) ? meta.env : [];
+      if (envs.some((e) => process.env[e])) available.add(provider);
+    }
+  } catch {
+    // models.json 不可读
+  }
+  return available;
+};
+
+const isMultimodalModel = (m) => {
+  const id = String(m.id).toLowerCase();
+  if (/vision|multimodal|omni|-vl-|-vl$|(^|-)v($|-)/.test(id)) return true;
+  if (m.attachment !== true) return false;
+  if (/deepseek|llama|gemma|mistral|ministral|gpt-(oss|[0-9]|-|$)|grok-|codestral|devstral/.test(id)) return false;
+  return true;
+};
+
+/* 套餐计费 provider（名字含 plan/token）：标注 cost=0 但实际扣套餐额度，不比按量便宜 */
+const isPlanBillingProvider = (provider) => /plan|token/i.test(provider);
+
+const scanAvailableModels = () => {
+  const authed = detectAuthedProviders();
+  const envOk = detectEnvProviders();
+  const available = new Set([...authed, ...envOk]);
+  const result = {};
+  try {
+    const models = JSON.parse(fs.readFileSync(MODELS_CACHE, 'utf8'));
+    for (const provider of available) {
+      const meta = models[provider];
+      if (!meta || !meta.models) continue;
+      const plan = isPlanBillingProvider(provider);
+      result[provider] = Object.values(meta.models).map((m) => ({
+        id: `${provider}/${m.id}`,
+        name: m.name,
+        family: m.family,
+        cost: m.cost,
+        plan,
+        context: m.limit && m.limit.context,
+        multimodal: isMultimodalModel(m),
+        reasoning: m.reasoning_options,
+      }));
+    }
+  } catch {
+    // 无 models.json 时返回 provider 名
+    for (const provider of available) result[provider] = [];
+  }
+  return result;
+};
+
+/* 真实成本估算：套餐计费视作"贵"（避免被当 $0 免费选），无成本信息视作未知 */
+const effectiveCost = (m) => {
+  if (!m || m.plan) return 9999;
+  if (m.cost && typeof m.cost.input === 'number') return m.cost.input;
+  return 999;
+};
+
+/* 根据模型声明的能力计算思考强度配置（agent.options 透传给 provider） */
+const reasoningConfigFor = (model) => {
+  const raw = model && model.reasoning;
+  if (!raw) return {};
+  const opts = Array.isArray(raw) ? raw : [raw];
+  const effort = opts.find((o) => o && o.type === 'effort');
+  if (effort && Array.isArray(effort.values) && effort.values.length) {
+    const values = effort.values;
+    const rank = { low: 0, medium: 1, high: 2, max: 3 };
+    const best = values
+      .map((v) => ({ v, r: rank[v] !== undefined ? rank[v] : 0 }))
+      .sort((a, b) => b.r - a.r)[0].v;
+    return { options: { reasoningEffort: best } };
+  }
+  if (opts.some((o) => o && o.type === 'toggle')) {
+    return { options: { reasoning: true } };
+  }
+  return {};
+};
+
+const findModelByAgent = (models, agentDef) => {
+  const id = agentDef.model || '';
+  const [provider, ...rest] = id.split('/');
+  const modelId = rest.join('/');
+  const list = models[provider] || [];
+  return list.find((m) => m.id === id) || list.find((m) => m.id.split('/').pop() === modelId) || list[0];
+};
+
+/* Arena leaderboard 参考（2026-08 抓取 https://arena.ai/leaderboard，仅覆盖常见可用模型） */
+const LEADERBOARD = {
+  webdev: ['kimi-k3-max', 'qwen3.8-max', 'glm-5.2-max', 'deepseek-v4-flash-high', 'claude-opus-4-7'],
+  vision: ['qwen3.8-max', 'gemini-3.6-flash', 'claude-fable-5', 'claude-opus-4-7'],
+  image2web: ['kimi-k3-max', 'qwen3.8-max', 'glm-5.2-max'],
+  coding: ['kimi-k3-max', 'qwen3.8-max', 'deepseek-v4-flash', 'glm-5.2-max', 'deepseek-v4-pro'],
+  text: ['qwen3.8-max', 'glm-5.2-max', 'deepseek-v4-flash', 'deepseek-v4-pro'],
+};
+
+const lbScore = (modelId, domain) => {
+  const short = modelId.split('/').pop().toLowerCase();
+  const list = LEADERBOARD[domain] || [];
+  const idx = list.findIndex((m) => short.includes(m.toLowerCase().replace(/-(high|max|thinking)$/, '')) || m.toLowerCase().includes(short));
+  return idx === -1 ? 50 : idx + 1;
+};
+
+const pickModel = (models, candidates, { preference = 'balanced', domain, multimodal, usePlan = 'auto' } = {}) => {
+  let pool = [];
+  for (const provider of Object.keys(models)) {
+    for (const m of models[provider]) pool.push(m);
+  }
+  if (!pool.length) return undefined;
+  if (multimodal) {
+    const vis = pool.filter((m) => m.multimodal);
+    if (vis.length) pool = vis;
+  }
+  const inCandidates = pool.filter((m) => candidates.some((c) => c.split('/').pop() === m.id.split('/').pop() || m.id === c));
+  if (inCandidates.length) pool = inCandidates;
+  const planModels = pool.filter((m) => m.plan);
+  const onDemand = pool.filter((m) => !m.plan);
+  if (usePlan === 'no') {
+    pool = onDemand;
+  } else if (usePlan === 'yes') {
+    const chosen = planModels.length
+      ? [...planModels, ...onDemand]
+      : onDemand;
+    const costOf = (m) => (m.plan ? 0 : effectiveCost(m));
+    const sortPlan = (arr) => {
+      arr.sort((a, b) => {
+        if (preference === 'performance') return lbScore(a.id, domain) - lbScore(b.id, domain);
+        if (preference === 'cost') return costOf(a) - costOf(b);
+        return lbScore(a.id, domain) + costOf(a) * 10 - (lbScore(b.id, domain) + costOf(b) * 10);
+      });
+    };
+    sortPlan(chosen);
+    return chosen[0].id;
+  }
+  pool.sort((a, b) => {
+    if (preference === 'performance') {
+      const pa = effectiveCost(a) === 9999 ? 1 : 0;
+      const pb = effectiveCost(b) === 9999 ? 1 : 0;
+      return pb - pa || lbScore(a.id, domain) - lbScore(b.id, domain);
+    }
+    if (preference === 'cost') {
+      return effectiveCost(a) - effectiveCost(b);
+    }
+    const sa = lbScore(a.id, domain) + effectiveCost(a) * 10;
+    const sb = lbScore(b.id, domain) + effectiveCost(b) * 10;
+    return sa - sb;
+  });
+  return pool[0].id;
+};
+
+const CLUSTER_COMMON_RULES = `## 通用合规层（所有 Cluster Subagent 必须遵守，缺任何一项不得说"完成"）
+
+### 安全红线（最高优先级）
+- 禁止对 \`$HOME\`/\`~\`/\`%USERPROFILE%\`/盘根执行递归删除或覆盖；删除前先打印解析后的绝对路径。
+- 禁止删除 \`.ssh\`/\`.config\`/\`.cargo\`/\`.rustup\`/\`.bun\`/\`.local\`/\`AppData\`/\`Program Files\`/\`.git\`；需要清理时让用户手动执行。
+- 只清理明确的项目内产物，先列目标再删。
+
+### 完成清单（必须项）
+- [ ] 动手前已做远程更新预检：git fetch + 查上游提交/CHANGELOG/issue，确认上游未实现/未修复才自研（已实现 → 提示用户改用上游并停止该任务块）
+- [ ] 修改前已 checkpoint（git commit 或 stash），checkpoint 只提交在当前分支，禁止为备份新建/切换分支
+- [ ] 收尾已回到基线分支（PR 合并后切回 main 并 pull；不走 PR 的项目本地 merge 回 main），未把用户留在 fix/feat 分支
+- [ ] Build/测试通过（实际运行命令并粘贴输出）
+- [ ] 原始场景复测通过（如适用）
+- [ ] 调试日志已清理
+- [ ] 涉及 API/架构/UI/行为变更 → 必须调用 project-docs 的 \`update_doc\`/\`create_adr\`，禁止自己乱写文档
+- [ ] 方案确认后 → 必须调用 \`store-decision\`
+- [ ] 任务完成后 → 必须调用 \`save-progress\`
+
+### Memory 强制
+- 阶段确认后必须调用 \`store-decision\`（记录选型理由和舍弃方案）
+- 任务完成必须调用 \`save-progress\`
+- 上下文将满 → 调用 \`prepare-handoff\`
+
+### AI 服从性（shared/ai-compliance.md）
+- 用户对方案说"改一下"：先停 → 更新方案 → 问确认 → 再改。跳过 = 违规
+- 说"验证通过"时必须：实际执行命令（不是肉眼检查）、粘贴命令输出（至少关键行）、明确说"符合预期"或"不符合预期"
+- **文件编辑禁忌（硬性）**：禁止用 PowerShell \`Set-Content\`/\`-replace\`/\`Out-File\` 修改源码文件（会破坏 UTF-8 编码导致无法编译），一律用编辑工具；损坏后无法 \`git checkout\` 恢复的文件必须整文件重写`;
+
+const SKILL_TYPE_MAP = {
+  feature: 'requirements-driven-dev',
+  frontend: 'requirements-driven-dev',
+  backend: 'requirements-driven-dev',
+  bugfix: 'diagnose-before-fix',
+  migrate: 'code-migrater',
+  qa: 'diagnose-before-fix',
+  docs: 'project-docs',
+};
+
+const readSkillBody = (skillsDir, name) => {
+  try {
+    const full = fs.readFileSync(path.join(skillsDir, name, 'SKILL.md'), 'utf8');
+    return stripFrontmatter(full);
+  } catch {
+    return null;
+  }
+};
+
+const PENTEST_AGENT_PROMPT = `你是专业的渗透测试工程师（Penetration 模式）。本会话专用于 Web 安全渗透测试，按 OWASP WSTG 流程执行。**除渗透测试报告外禁止修改/创建任何文件**（不碰项目源码、.memory、目标机文件）；唯一允许的写入位置是 \`docs/penetration-reports/\`。
+
+## 授权硬门槛
+- 仅对用户拥有或已获书面授权的目标测试；用户无法确认授权时停止并要求确认。
+- 仅测试授权确认的范围内目标；不做拒绝服务类测试。
+
+## 第一步：question 确认（必须，未确认不得动手）
+用 question 工具确认：
+1. 测试方式：黑盒（仅 URL）/ 灰盒（有账号）/ 白盒（有源码文档）
+2. 测试范围：信息收集/配置/认证/授权/会话/输入验证/业务逻辑/客户端（多选）
+3. 是否允许攻击验证（可能产生日志）
+4. 时间窗口限制
+
+## 第二步：环境准备
+工具优先级：
+1. \`wsl-pentest\` MCP 服务器的工具：\`wsl-run\` / \`wsl-tool-check\` / \`wsl-install\` / \`wsl-nmap\` / \`wsl-sqlmap\` / \`wsl-nikto\` / \`wsl-curl\`（认证/授权/会话手工请求主力）/ \`wsl-hydra\` / \`wsl-httpx\` / \`wsl-dirsearch\`（宿主可能以 mcp__ 前缀注册）。后端自动适配：Windows 经 WSL，Linux 等自带 bash 的系统直接本机执行，功能一致
+2. MCP 未配置时回退直接执行等价命令：Linux/macOS 本机 bash 直接跑；Windows 用 \`wsl -e bash -c "<命令>"\`
+先 \`wsl-tool-check\` 检查缺失工具，经用户同意后再 \`wsl-install\` 安装。
+
+**WSL 缺失处理（硬性流程）**：工具返回 \`code: "WSL_NOT_AVAILABLE"\` 或 bash 报 wsl 不存在时——
+1. 用 question 工具向用户警告：「本机未安装/不可用 WSL，渗透工具能力将大幅受限，是否继续？」
+2. 用户拒绝 → 建议安装 WSL 后再来，本次终止。
+3. 用户同意继续 → 回退 pwsh 同类工具，并在报告与阶段汇报中标注「pwsh 回退执行」：
+
+| 原 WSL 工具 | pwsh 回退 |
+|------------|-----------|
+| nmap 端口扫描 | \`Test-NetConnection <host> -Port <p>\` 逐端口 TCP 探测 |
+| whatweb 指纹 | \`Invoke-WebRequest\` 取响应头/HTML 正则特征（Server、X-Powered-By、generator meta） |
+| curl 安全头检查 | \`Invoke-WebRequest -Method Head\` 检查 HSTS/CSP/X-Frame-Options 等 |
+| dirb/gobuster 目录探测 | \`Invoke-WebRequest\` 循环小字典（限速 ≤10 req/s） |
+| sqlmap / nikto / hydra | **无安全等价实现，跳过该自动化项**，在报告中标注"需 WSL"，不得用 pwsh 盲测注入 |
+
+## 第三步：按阶段执行（OWASP WSTG）
+各阶段详细检查点/Payload 库/脚本/判定标准见 penetration-testing Skill 的 \`phases/\` 文件：
+1. WSTG-INFO 信息收集（含信息泄漏：PII/硬编码/备份文件）→ \`phases/info-gathering.md\`
+2. WSTG-CONF 配置：nikto/安全响应头/目录列表/备份文件
+3. WSTG-ATHN 认证：弱口令/JWT/OAuth/MFA 绕过 → \`phases/authentication.md\`
+4. WSTG-ATHZ 授权：IDOR/方法绕过/CSRF/权限矩阵 → \`phases/authorization.md\`
+5. WSTG-SESS + WSTG-CLNT 会话与客户端：Cookie/CORS/postMessage/WebSocket/点击劫持/DOM XSS → \`phases/session-client-side.md\`
+6. WSTG-INPV 输入验证（核心）：XSS 三型/SQLi 含盲注/命令注入/盲 SSRF/OOB XXE → \`phases/injection-testing.md\`
+7. WSTG-BUSL 业务逻辑：价格篡改/流程跳过/竞态/回调伪造 → \`phases/business-logic.md\`
+8. 高级攻击与绕过：路径穿越/HPP/原型链污染/反序列化/请求走私（仅验证级）→ \`phases/advanced-attacks.md\`
+9. WSTG-ERRH / WSTG-CRYPST 错误处理与密码学速查：错误页泄漏/TLS 套件/明文传输，随阶段 1-2 一并核查
+
+**安全边界（全阶段生效）**：循环测试限速 ≥200ms；暴力破解单账号 ≤10 次/分钟、遍历 ≤20 id/分钟；禁超长 sleep/大文件读取等 DoS payload；证明可利用即停止，不批量拉取数据、不写入他人数据、不攻击其他用户会话（走私/竞态需先申请窗口）。
+
+## 第四步：攻击验证
+仅对高危漏洞且用户明确允许时验证可利用性（如 sqlmap --dump）。
+
+## 第五步：报告（唯一允许的文件写入）
+将完整 Markdown 报告写到 \`docs/penetration-reports/YYYY-MM-DD-<目标slug>.md\`（项目根目录相对路径，日期取测试当日），结构：执行摘要（目标/方式/时间）→ 风险摘要表（严重/高危/中危/低危计数）→ 漏洞汇总表（漏洞类型/位置/参数/Payload/证据/风险/修复建议）→ 漏洞详情（位置/Payload/证据/CVSS/影响/**建议解决方案**）→ 工具使用记录表 → 修复优先级。每个漏洞必须给出**建议解决方案**：具体可执行的修复措施（配置修改步骤/代码级修复方向/需升级的依赖及目标版本），不许只写"建议加固"。每条结论必须附带真实工具输出的关键行作为证据，没有证据的项标注"未验证"；回退 pwsh 执行的阶段要注明。回复中输出报告路径 + 风险摘要 + 高危漏洞要点及其建议解决方案。
+
+## 技术注意
+- 大规模扫描可能触发 WAF/IDS，建议低峰时段；控制并发与速率。
+- 每个阶段结束简要汇报发现，再进入下一阶段。`;
+
+const GOAL_AGENT_PROMPT = `你是 Goal 目标迭代模式的执行者。用户给你一个目标，你负责按「目标清单」（GOAL_LIST.MD 标准格式）多轮迭代推进，直到总体验收通过或达到轮次上限。
+
+## 开工前（两步必做，杜绝跑偏）
+**第一步：确认清单来源，二选一**
+- A. 用户提供目标清单文件（如桌面 \`GOAL_LIST.MD\`、项目内 \`docs/goal.md\` 等）→ 用 Read 读取文件，用 \`goal-set(fromFile: "<路径>")\` 直接导入建档；**不要再逐项问卷**。
+  - **文件不标准 → 自动补全，缺项询问用户**：若 goal-set 返回「补全提示」或「清单文件诊断」，逐项处理——能自动推断的（如 mission 缺失可从目标标题推断、优先级缺失标 P2）自动补齐；无法推断的（如某子目标缺成功标准、轮次上限、异常预案）**用 question 逐一询问用户补齐**；用户补不齐的按已解析的最小可用清单建档，并在迭代日志标注缺失项。
+  - 文件完全无法解析（无任何子目标）→ 提示用户文件需符合 GOAL_LIST.MD 标准格式（\`### FIX-XX/ENH-XX\` 区块 + 成功标准），或放弃文件改用问卷方式（B）。
+- B. 无文件 → 先读代码了解现状，再按 7 区块模板逐项澄清：
+  1.【核心使命】一句话总目标
+  2.【全局约束】带 ID 约束表（GC-01…）
+  3.【目标清单】FIX-XX 修复类 + ENH-XX 优化类子目标（目标描述/触发条件/成功标准附验证命令/执行步骤/降级策略/约束条件/优先级 P0-P3）
+  4.【执行策略】优先级/并行规则/暂停恢复
+  5.【验证规则】通用 VR-XX + 各子目标专属
+  6.【终止条件】成功/提前/部分完成
+  7.【回滚约定】基线 commit hash；每轮前后 git checkpoint
+
+**第二步：用 question 确认运行节奏（给完 goal 后必须问，别默认、别直接开跑）**
+- 向用户明确询问："**要不要自动循环？怎么循环？**"
+- 选项：① auto 自动连跑（无人值守：跑完一轮自动继续，直到达标/达上限/异常才停，空闲由插件自驱续跑）② confirm 每轮确认（每轮轮末 question 请示）③ 手动驱动（每轮由用户发指令推进，可配合 scripts/goal-loop.ps1 外部硬循环）。
+- 用户选 auto → mode=auto；同时用 question 一次性确认 Pre-Flight（轮次上限/异常预案/确认开跑），之后运行中不再提问。
+- 用户选 confirm → mode=confirm；每轮轮末 question 请示。
+- 用户不明确 → 默认推荐 auto（清单完整可自动验证时），但必须经用户确认后再建档，不得自行决定。
+
+## 每轮纪律（顺序执行，缺一违规）
+1. 轮首 \`goal-check(advance: true)\` 获取精简状态卡，严格遵守
+2. **todo 进度可视化（每轮必做）**：用 \`todowrite\` 维护进度清单，让用户在界面实时看到跑到哪一步——当前子目标置 \`in_progress\` 并按执行步骤拆成 item；其余子目标一行一个 \`pending\`；已完成的置 \`completed\`。每完成一步立即更新对应 item 状态，子目标全部完成时勾选其成功标准并同步 todo。
+3. **分步注入（防上下文污染）**：完整清单在 \`.memory/goals/active.md\`，不整篇回显；按需读当前子目标详情，其余一行代替
+4. **防卡命令纪律（无人值守不卡死）**：
+   - **禁止启动长驻/不结束的进程**（如 \`npm run dev\`、\`node server.js\`、\`docker compose up\`、\`cargo run\` 等）——bash 命令不结束就不返回，会把整轮卡死
+   - 验证只跑**会自然结束**的命令（build/test/lint/typecheck/curl 单请求等）；确实需要服务时：后台启动（\`Start-Process ... -PassThru\`）+ 验证完立即 \`Stop-Process\`，或对单条命令设置合理 timeout
+   - **git 提交一律禁用 GPG 签名**（签名会弹窗/等密码，无人值守卡死）：\`git -c commit.gpgsign=false commit ...\`；确实要签名的等人工参与时再处理
+5. 防倒退契约：遗留未勾选标准优先；同一标准连续 3 轮无新证据 → 停下问询（auto 按预案或 GOAL_STOP）
+6. **每轮 checkpoint（前后各一次）**：轮前基线（git commit/stash + hash 写日志）；轮末证据写回 active.md（\`- [x] ... ✅第N轮:<证据>\`，日志记一行）→ \`git add -A && git -c commit.gpgsign=false commit -m "checkpoint(goal): 第N轮 <摘要>"\`（无变更跳过；严禁 push）
+7. 判定达标以真实命令输出为据（粘贴关键输出），禁止口头宣称
+8. 最小改动；不碰范围红线
+
+## auto 自动续跑机制
+- auto 模式完成一轮后会话空闲，插件 \`session.idle\` 自驱续跑下一轮；若发现未自动续跑，提示用户改用 \`pwsh scripts/goal-loop.ps1\` 外部硬循环兜底，不要干等。
+- 用户想中途改节奏：\`goal-set(mode: "confirm"/"auto")\` 可随时切换，无需重建。
+
+## 上限与无限
+- 已达轮次上限 → 立即停下 question：加轮次（goal-set extend:true, addIterations:N）或放弃（goal-close abandoned）
+- maxIterations=0 无限模式：每满 5 轮强制 question 阶段性汇报
+
+## 结束协议（总体验收 + 不合格回退打回；哨兵供 goal-loop.ps1 判停）
+- 全部标准勾选后不得直接 close：先【总体验收】逐条重跑全部验证规则（通用 VR + 各子目标专属）核对真实命令输出
+- 验收全部通过 → \`goal-close(result:"achieved", summary)\` → save-progress → 回复末尾输出 \`GOAL_ACHIEVED\`
+- 验收不合格 → 不得 close：\`git reset --hard\` 回滚最近 checkpoint(goal) 提交，失败子目标标记回 \`- [ ]\`，日志记录原因与重做计划，继续下一轮打回重做
+- 触发异常预案/用户叫停 → \`goal-close(result:"abandoned", summary)\` → 输出 \`GOAL_STOP\` 或 \`GOAL_BLOCKED\`
+- 正常迭代轮次不得输出哨兵标记`;
+
+const buildClusterAgents = (models, skillsDir) => {
+  const available = Object.keys(models);  const anyModel = () => (available.length ? `${available[0]}/${models[available[0]][0].id.split('/')[1]}` : undefined);
+
+  const makeAgent = (def) => {
+    const agent = { ...def };
+    if (!agent.model) agent.model = anyModel();
+    const model = findModelByAgent(models, agent);
+    const reasoning = reasoningConfigFor(model);
+    if (reasoning.options) agent.options = { ...(agent.options || {}), ...reasoning.options };
+    const common = [
+      '你是 junsi-dev-toolkit 的 Cluster 专精 Subagent。',
+      `本任务类型对应子技能：\`${SKILL_TYPE_MAP[def.type || 'feature']}\`（派发时主控会注入其 SKILL.md 全文，必须严格遵守其流程）。`,
+      '',
+      CLUSTER_COMMON_RULES,
+    ].join('\n');
+    agent.prompt = common;
+    return agent;
+  };
+
+  const agents = {};
+
+  agents['cluster'] = makeAgent({
+    type: 'feature',
+    description: 'Cluster 模式主控：总体规划、细化需求、任务分块，派发给专精模型 Subagent 并行执行',
+    mode: 'primary',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2']) || anyModel(),
+    temperature: 0.2,
+    permission: {
+      edit: 'allow',
+      bash: 'allow',
+      task: { '*': 'deny', 'cluster-*': 'allow' },
+    },
+  });
+
+  agents['cluster-planner'] = makeAgent({
+    type: 'feature',
+    description: 'Cluster 规划 Subagent：需求细化、任务拆分、技术方案设计（规划专精模型）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2']) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'deny', bash: 'deny' },
+  });
+
+  agents['cluster-frontend'] = makeAgent({
+    type: 'frontend',
+    description: 'Cluster 前端 Subagent：TS/React/Vue 等前端实现（前端专精模型，支持看图）',
+    mode: 'subagent',
+    model: pickModel(models, ['moonshotai/kimi-k3', 'zhipuai/glm-5v-turbo', 'zhipuai/glm-4.6v', 'deepseek/deepseek-v4-flash'], {
+      domain: 'webdev',
+      multimodal: true,
+    }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-backend'] = makeAgent({
+    type: 'backend',
+    description: 'Cluster 后端 Subagent：API/数据库/服务端实现（后端专精模型）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'], {
+      domain: 'coding',
+    }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-qa'] = makeAgent({
+    type: 'qa',
+    description: 'Cluster 测试 Subagent：测试用例、构建验证、回归（测试专精模型）',
+    mode: 'subagent',
+    model: pickModel(models, ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-docs'] = makeAgent({
+    type: 'docs',
+    description: 'Cluster 文档 Subagent：ADR/README/API 文档撰写（文档专精模型）',
+    mode: 'subagent',
+    model: pickModel(models, ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'], { domain: 'text' }) || anyModel(),
+    temperature: 0.3,
+    permission: { edit: 'allow', bash: 'deny' },
+  });
+
+  agents['cluster-reviewer'] = makeAgent({
+    type: 'bugfix',
+    description: 'Cluster 代码审查 Subagent：diff 审查、风险评分、回归风险与修改建议（只读分析，不直接改代码）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'deny', bash: 'allow' },
+  });
+
+  agents['cluster-security'] = makeAgent({
+    type: 'bugfix',
+    description: 'Cluster 安全 Subagent：漏洞扫描、注入/XSS/敏感信息检测、CVE 比对（bash 可跑扫描工具，修复建议不改码）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'deny', bash: 'allow' },
+  });
+
+  agents['cluster-architect'] = makeAgent({
+    type: 'feature',
+    description: 'Cluster 架构 Subagent：模块划分、DDD、技术选型权衡、ADR 草案（只读分析，产出设计文档）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'], { domain: 'text' }) || anyModel(),
+    temperature: 0.3,
+    permission: { edit: 'allow', bash: 'deny' },
+  });
+
+  agents['cluster-performance'] = makeAgent({
+    type: 'bugfix',
+    description: 'Cluster 性能 Subagent：剖析热点、定位瓶颈、优化算法与 IO（可改代码，改动需最小化）',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-devops'] = makeAgent({
+    type: 'backend',
+    description: 'Cluster DevOps Subagent：CI/CD 流水线、构建脚本、容器化、数据库迁移脚本',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['cluster-data'] = makeAgent({
+    type: 'backend',
+    description: 'Cluster 数据 Subagent：数据库设计、SQL 优化、索引策略、API 数据契约',
+    mode: 'subagent',
+    model: pickModel(models, ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.1,
+    permission: { edit: 'allow', bash: 'allow' },
+  });
+
+  agents['penetration'] = {
+    description: 'Penetration 渗透测试模式：OWASP WSTG 流程 + WSL 工具（wsl-pentest MCP），报告写入 docs/penetration-reports/',
+    mode: 'primary',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+    prompt: PENTEST_AGENT_PROMPT,
+  };
+
+  agents['goal'] = {
+    description: 'Goal 目标迭代模式：设定目标与可验证验收标准，多轮迭代推进直到达标或达轮次上限（默认 10，支持外部脚本硬循环）',
+    mode: 'primary',
+    model: pickModel(models, ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'], { domain: 'coding' }) || anyModel(),
+    temperature: 0.2,
+    permission: { edit: 'allow', bash: 'allow' },
+    prompt: GOAL_AGENT_PROMPT,
+  };
+
+  return agents;
+};
+
+const registerClusterTools = async (tools, skillsDir) => {
+
+  tools['cluster-task-prompt'] = tool({
+    description:
+      '生成 Cluster Subagent 的完整派发 prompt：任务描述 + 验收标准 + 通用合规层（memory/docs/完成清单/ai-compliance）+ 任务类型对应的子技能 SKILL.md 全文。派发 Subagent 前必须调用本工具。',
+    args: {
+      type: schema
+        .enum(['feature', 'frontend', 'backend', 'bugfix', 'migrate', 'qa', 'docs'])
+        .describe('任务类型：feature/frontend/backend=新功能开发(RDD)；bugfix=Bug修复(diagnose)；migrate=代码移植；qa=测试验证；docs=文档'),
+      task: schema.string().describe('任务块描述'),
+      acceptance: schema.string().optional().describe('验收标准'),
+      files: schema.string().optional().describe('输入/输出文件'),
+      constraints: schema.string().optional().describe('约束'),
+    },
+    async execute(args, _context) {
+      const skillName = SKILL_TYPE_MAP[args.type] || 'requirements-driven-dev';
+      const skillBody = readSkillBody(skillsDir, skillName);
+      const lines = [
+        '# Cluster 任务派发',
+        '',
+        `## 任务块`,
+        args.task,
+        '',
+        ...(args.acceptance ? [`## 验收标准`, args.acceptance, ''] : []),
+        ...(args.files ? [`## 输入/输出文件`, args.files, ''] : []),
+        ...(args.constraints ? [`## 约束`, args.constraints, ''] : []),
+        '',
+        '## 通用合规层（必须遵守，缺任何一项不得说"完成"）',
+        '',
+        CLUSTER_COMMON_RULES,
+        '',
+        `## 任务类型子技能全文（${skillName}，必须严格遵守其流程）`,
+        '',
+        skillBody || `（子技能 ${skillName} 读取失败，仍须遵守上方通用合规层）`,
+      ];
+      return lines.join('\n');
+    },
+  });
+
+  tools['cluster-scan-models'] = tool({
+    description:
+      '扫描本机实际可用的 LLM provider 和模型（auth.json + 环境变量），标注多模态（✅ 可看图）与成本。Cluster 模式在分配任务块前必须调用，推荐模型只能从结果中选择。',
+    args: {},
+    async execute(_args, _context) {
+      const models = scanAvailableModels();
+      const lines = ['## 本机可用模型', '', '> ✅ = 多模态（可识图，前端/UI 校验用）｜ 单位 $/百万 token ｜ 思考: effort档位或 on/off ｜ ⚠️套餐 = 套餐计费（标注 $0 但扣套餐额度）', ''];
+      for (const [provider, modelList] of Object.entries(models)) {
+        const planTag = isPlanBillingProvider(provider) ? ' ⚠️套餐' : '';
+        lines.push(`### ${provider}（${modelList.length} 个模型）${planTag}`);
+        if (!modelList.length) {
+          lines.push('（已认证但模型清单不可读）');
+          continue;
+        }
+        for (const m of modelList) {
+          const cost = m.plan ? '套餐' : m.cost ? `$${m.cost.input}/$${m.cost.output}` : '?';
+          const ctx = m.context ? `${(m.context / 1000).toFixed(0)}K` : '?';
+          const vis = m.multimodal ? ' ✅' : '';
+          const rc = reasoningConfigFor(m);
+          const ro = rc.options || {};
+          const reasoning = ro.reasoningEffort ? `，思考:${ro.reasoningEffort}` : ro.reasoning === true ? '，思考:on' : '';
+          lines.push(`- \`${m.id}\` — ${m.name}（${m.family || '?'}，ctx ${ctx}，${cost}${reasoning}）${vis}`);
+        }
+        lines.push('');
+      }
+      if (!Object.keys(models).length) lines.push('（未检测到任何可用 provider，请先配置 API key）');
+      return lines.join('\n');
+    },
+  });
+
+  tools['cluster-allocation'] = tool({
+    description:
+      'Cluster 模式：根据本机可用模型和用户倾向（性价比/性能/平衡 + 是否使用套餐额度）生成任务块 → 专精模型分配方案。分配前必须先调用 cluster-scan-models；前端/看图任务自动优先多模态模型；必须用 question 工具问用户偏好与套餐选择并确认。',
+    args: {
+      tasks: schema
+        .string()
+        .describe('任务块描述（JSON 数组），如 [{"name":"登录页","type":"frontend"},{"name":"用户API","type":"backend"}]'),
+      preference: schema
+        .enum(['cost', 'performance', 'balanced'])
+        .optional()
+        .describe('用户倾向：cost=性价比优先(省钱) / performance=性能优先(贵但强) / balanced=平衡（默认）'),
+      usePlan: schema
+        .enum(['auto', 'yes', 'no'])
+        .optional()
+        .describe('是否使用套餐计费模型（如 zhipuai-coding-plan，标注 $0 但扣套餐额度）：auto=需逐项询问用户是否用各套餐（默认）/ yes=用户同意用套餐 / no=用户拒绝，只用按量'),
+    },
+    async execute(args, _context) {
+      const models = scanAvailableModels();
+      const preference = args.preference || 'balanced';
+      const usePlan = args.usePlan || 'auto';
+      const domainOf = (type) => {
+        if (type === 'frontend') return 'webdev';
+        if (type === 'qa' || type === 'reviewer' || type === 'security' || type === 'performance' || type === 'devops' || type === 'data') return 'coding';
+        if (type === 'planner' || type === 'architect') return 'text';
+        return 'coding';
+      };
+      const preferred = {
+        planner: ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
+        frontend: ['moonshotai/kimi-k3', 'zhipuai/glm-4.6v', 'zhipuai/glm-5v-turbo', 'deepseek/deepseek-v4-flash'],
+        backend: ['deepseek/deepseek-v4-flash', 'deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
+        qa: ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        docs: ['zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        reviewer: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        security: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2', 'deepseek/deepseek-v4-flash'],
+        architect: ['deepseek/deepseek-v4-pro', 'zhipuai/glm-5.2'],
+        performance: ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'],
+        devops: ['deepseek/deepseek-v4-flash', 'zhipuai/glm-5.2'],
+        data: ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash'],
+      };
+      const needsVision = (type, name) =>
+        type === 'frontend' || /截图|看图|页面|界面|ui|视觉|样式|布局/i.test(name || '');
+      let tasks;
+      try {
+        tasks = JSON.parse(args.tasks);
+      } catch {
+        tasks = args.tasks
+          .split(',')
+          .filter(Boolean)
+          .map((s) => ({ name: s.trim() }));
+      }
+      const prefLabel = { cost: '💰 性价比优先', performance: '🚀 性能优先', balanced: '⚖️ 平衡' }[preference];
+      const planProviders = Object.keys(models).filter((p) => isPlanBillingProvider(p) && models[p].length);
+      const planLabel =
+        usePlan === 'yes'
+          ? `✅ 用套餐（${planProviders.join('、')}）`
+          : usePlan === 'no'
+            ? '🚫 不用套餐，只按量计费'
+            : '❓ 待询问用户是否用套餐';
+      const lines = [
+        '## Cluster 模型分配方案',
+        '',
+        `**用户倾向：${prefLabel}**（用户可手动调整）｜ **套餐额度：${planLabel}**`,
+        '',
+        '| 任务块 | 类型 | 需多模态 | 推荐模型 | 思考强度 | Subagent | 成本(入/出 per M) |',
+        '|--------|------|---------|---------|---------|----------|------------------|',
+      ];
+      const pickOne = (cands, type, visionNeeded) => pickModel(models, cands, { preference, domain: domainOf(type), multimodal: visionNeeded, usePlan });
+      const priceOf = (id) => {
+        const [p] = id.split('/');
+        const m = models[p] && models[p].find((x) => x.id === id);
+        if (!m) return '?';
+        if (m.plan) return '⚠️套餐';
+        return m.cost && m.cost.input ? `$${m.cost.input}/${m.cost.output || '?'}` : '?';
+      };
+      const reasoningOf = (id) => {
+        const [p] = id.split('/');
+        const m = models[p] && models[p].find((x) => x.id === id);
+        const cfg = reasoningConfigFor(m);
+        const opt = cfg.options || {};
+        if (opt.reasoningEffort) return `effort:${opt.reasoningEffort}`;
+        if (opt.reasoning === true) return 'on';
+        return '—';
+      };
+      for (const t of tasks) {
+        const type = t.type || (t.name.includes('测试') || t.name.includes('验证') ? 'qa' : t.name.includes('文档') ? 'docs' : t.name.includes('方案') || t.name.includes('规划') ? 'planner' : 'frontend');
+        const visionNeeded = needsVision(type, t.name);
+        const agentName = `cluster-${type}`;
+        const modelId = pickOne(preferred[type] || preferred.frontend, type, visionNeeded);
+        lines.push(`| ${t.name} | ${type} | ${visionNeeded ? '✅' : '—'} | \`${modelId || '未检测到可用模型'}\` | ${reasoningOf(modelId) || '—'} | \`${agentName}\` | ${priceOf(modelId) || '?'} |`);
+      }
+      if (planProviders.length && usePlan === 'auto') {
+        lines.push(
+          '',
+          '## ⚠️ 检测到套餐计费 provider，必须先询问用户',
+          `本机可用套餐：\`${planProviders.join('、')}\`（标注 $0 但扣套餐额度；套餐开销与按量比例相当，不是免费）`,
+          '用 question 工具逐项询问用户是否使用这些套餐内的模型，例如：',
+          `- "是否使用 \`${planProviders[0]}\` 内的模型？"（✅ 使用 / 🚫 不用，只按量计费）`,
+          ...(planProviders.length > 1
+            ? planProviders.slice(1).map((p) => `- "是否使用 \`${p}\` 内的模型？"（✅ 使用 / 🚫 不用）`)
+            : []),
+          '用户选择后：同意 → 重新调用本工具传 \`usePlan: "yes"\`；全部拒绝 → 传 \`usePlan: "no"\`。',
+          '用户回答前不得派发 Subagent。',
+          ''
+        );
+      }
+      lines.push('', '**必须用 question 工具向用户确认此分配方案（或让用户手动指定模型）后再派发 Subagent。**');
+      lines.push('', '> 推荐依据：https://arena.ai/leaderboard（WebDev/Image-to-WebDev/Vision/Coding 分榜）。多模态任务必须选 ✅ 模型（能识图确认前端效果）。思考强度按模型能力自动设置（effort 档位或 on/off）。');
+      return lines.join('\n');
+    },
+  });
+
+  return { ok: true };
+};
+
+/* ---------- 实用工具：tool-search + cron-create ---------- */
+
+const TOOL_INDEX = [
+  { id: 'bash', use: '执行终端命令（构建/测试/git/安装）' },
+  { id: 'read/write/edit/apply_patch', use: '读写与修改文件' },
+  { id: 'grep/glob', use: '内容正则搜索 / 文件名模式搜索' },
+  { id: 'webfetch/websearch', use: '抓取网页 / 网络搜索' },
+  { id: 'question', use: '向用户提问澄清需求或确认方案' },
+  { id: 'todowrite', use: '多步骤任务待办清单' },
+  { id: 'task', use: '派发子代理（独立子任务）' },
+  { id: 'skill', use: '加载技能（SKILL.md 工作流）' },
+  { id: 'store-decision', use: '阶段确认后记录决策' },
+  { id: 'rdd-phase', use: 'RDD 阶段门禁：plan 待确认 / start 放行 / done 验证' },
+  { id: 'save-progress', use: '任务完成保存进度' },
+  { id: 'prepare-handoff/restore-handoff', use: '跨会话恢复（换会话时）' },
+  { id: 'list-decisions/memory-doctor/save-preference', use: '决策回顾/记忆体检/全局偏好' },
+  { id: 'cluster-task-prompt/cluster-scan-models/cluster-allocation', use: 'Cluster 多模型并行开发' },
+  { id: 'goal-set/goal-check/goal-close', use: 'Goal 目标迭代（设定目标多轮推进直到达标）' },
+  { id: 'tool-search', use: '本工具：按关键词找最合适的工具' },
+  { id: 'cron-create', use: '创建/列出/删除 Windows 计划任务' },
+  { id: 'MCP project-docs_*', use: '项目文档/代码感知（架构/API/组件/路由）' },
+  { id: 'MCP glm-vision_*', use: '图片理解/OCR（视觉分析）' },
+];
+
+const registerUtilityTools = async (tools) => {
+
+  tools['tool-search'] = tool({
+    description: '按关键词在工具索引中模糊检索，返回最合适工具 + 使用时机。当不知道用哪个工具完成任务时调用。',
+    args: { keyword: schema.string().describe('任务描述或关键词，如"搜索文件""保存进度"') },
+    async execute(args) {
+      const kw = (args.keyword || '').trim().toLowerCase();
+      const all = TOOL_INDEX.map((t) => `- \`${t.id}\`：${t.use}`).join('\n');
+      if (!kw) return `## 工具索引\n\n${all}`;
+      const hits = TOOL_INDEX.filter((t) => `${t.id} ${t.use}`.toLowerCase().includes(kw));
+      return hits.length
+        ? `## 匹配工具（${kw}）\n\n${hits.map((t) => `- \`${t.id}\`：${t.use}`).join('\n')}`
+        : `无匹配工具（关键词：${kw}）。\n\n## 工具索引\n\n${all}`;
+    },
+  });
+
+  tools['cron-create'] = tool({
+    description: '创建/列出/删除 Windows 计划任务（schtasks 封装）。用户说"定时提醒/每天执行/定时任务"时调用。',
+    args: {
+      action: schema.enum(['create', 'list', 'delete']).describe('操作：create=创建 / list=列出 / delete=删除'),
+      taskName: schema.string().optional().describe('任务名（create/delete 必填）'),
+      command: schema.string().optional().describe('要执行的命令（create 必填），如 "node D:\\task.js"'),
+      schedule: schema.string().optional().describe('触发计划（create 必填）："频次 时间"，如 "DAILY 09:00" / "ONCE 14:30"'),
+      startDate: schema.string().optional().describe('开始日期 YYYY/MM/DD（默认今天）'),
+    },
+    async execute(args) {
+      const { execFileSync } = await import('child_process');
+      const { TextDecoder } = await import('util');
+      const gbk = new TextDecoder('gbk', { fatal: false });
+      const run = (argList) => {
+        try {
+          const buf = execFileSync('schtasks.exe', argList, { encoding: 'buffer', windowsHide: true });
+          return gbk.decode(buf).trim();
+        } catch (e) {
+          return `执行失败: ${e.message}`;
+        }
+      };
+      if (args.action === 'list') {
+        const out = run(['/Query', '/FO', 'LIST', '/V']);
+        const lines = out.split(/\r?\n/).filter((l) => /任务名|TaskName|状态|Status|下次运行时间|Next Run Time/i.test(l));
+        return lines.length ? lines.join('\n') : out;
+      }
+      if (args.action === 'delete') {
+        if (!args.taskName) return 'delete 需要 taskName';
+        return run(['/Delete', '/TN', args.taskName, '/F']);
+      }
+      if (!args.taskName || !args.command) return 'create 需要 taskName 与 command';
+      const [freq, time] = (args.schedule || 'DAILY 09:00').split(/\s+/);
+      const argList = ['/Create', '/TN', args.taskName, '/TR', args.command, '/SC', freq, '/ST', time];
+      if (args.startDate) argList.push('/SD', args.startDate);
+      return run(argList);
+    },
+  });
+
+  return { ok: true };
+};
+
+/* ---------- Goal 目标迭代工具 ---------- */
+
+const readActiveGoal = (projectDir) => readOrEmpty(path.join(memoryDir(projectDir), 'goals', 'active.md'));
+const goalRoundOf = (content) => {
+  const m = content.match(/^- 轮次：(\d+)\/(\d+)$/m);
+  return m ? { done: Number(m[1]), max: Number(m[2]) } : { done: 0, max: 10 };
+};
+const fmtRound = (r) => (r.max === 0 ? `${r.done}/∞` : `${r.done}/${r.max}`);
+
+const splitList = (raw) => String(raw || '').split(/[\n,，、;；]+/).map((s) => s.trim()).filter(Boolean);
+
+const countChecks = (content) => {
+  const open = (content.match(/^\s*- \[ \] /gm) || []).length;
+  const done = (content.match(/^\s*- \[x\] /gim) || []).length;
+  return { open, done };
+};
+
+/* 解析 GOAL_LIST 风格 active.md 中的子目标块（### FIX-01/ENH-01 …），返回每块的勾选进度 */
+const parseGoalBlocks = (content) => {
+  const blocks = [];
+  const lines = content.split('\n');
+  let cur = null;
+  for (const line of lines) {
+    if (/^### (FIX|ENH|BUG|FEAT)-\d+[：:]/.test(line)) {
+      cur = { title: line.replace(/^### /, '').trim(), body: [] };
+      blocks.push(cur);
+    } else if (cur) {
+      cur.body.push(line);
+    }
+  }
+  return blocks.map((b) => {
+    const body = b.body.join('\n');
+    return {
+      title: b.title,
+      open: (body.match(/^\s*- \[ \] /gm) || []).length,
+      done: (body.match(/^\s*- \[x\] /gim) || []).length,
+      priority: (body.match(/优先级[：:]\s*([P0-9]+)/) || [])[1],
+    };
+  });
+};
+
+/* 按 GOAL_LIST.MD 标准格式生成 active.md；无 goals 时回退单目标（criteria → FIX-01） */
+const buildGoalDoc = (args, mode, max) => {
+  const head = [
+    `# GOAL: ${args.goal.trim()}`,
+    `- 模式：${mode}`,
+    `- 轮次：0/${max}`,
+    `- 创建：${new Date().toISOString()}`,
+  ];
+  const body = [];
+  body.push('', '## 1. 核心使命 (Core Mission)', `> ${(args.mission || '').trim() || args.goal.trim()}`, '');
+
+  const gcs = splitList(args.globalConstraints);
+  if (gcs.length) {
+    body.push('## 2. 全局约束 (Global Constraints)');
+    gcs.forEach((g, i) => body.push(`- GC-${String(i + 1).padStart(2, '0')}: ${g}`));
+    body.push('');
+  }
+
+  let goals = [];
+  try {
+    goals = JSON.parse(args.goals || '[]');
+    if (!Array.isArray(goals)) goals = [];
+  } catch {
+    goals = [];
+  }
+  if (!goals.length) {
+    const criteria = splitList(args.criteria);
+    goals = [
+      {
+        id: 'FIX-01',
+        type: 'fix',
+        title: args.goal.trim(),
+        description: args.background,
+        success: criteria.join(';'),
+        priority: 'P0',
+      },
+    ];
+  }
+
+  const renderGoal = (g) => {
+    const lines = [`### ${g.id}${g.title ? '：' + g.title : ''}`];
+    if (g.description) lines.push(`- 目标描述：${g.description}`);
+    if (g.trigger) lines.push(`- 触发条件：${g.trigger}`);
+    const succ = String(g.success || '').split(/[;；]+/).map((s) => s.trim()).filter(Boolean);
+    if (succ.length) {
+      lines.push('- 成功标准：');
+      succ.forEach((s) => lines.push(`  - [ ] ${s}`));
+    }
+    if (g.steps) lines.push(`- 执行步骤：${g.steps}`);
+    if (g.fallback) lines.push(`- 降级策略：${g.fallback}`);
+    if (g.constraint) lines.push(`- 约束条件：${g.constraint}`);
+    if (g.priority) lines.push(`- 优先级：${g.priority}`);
+    return lines;
+  };
+
+  const fix = goals.filter((g) => g.type === 'fix');
+  const enh = goals.filter((g) => g.type !== 'fix');
+  if (fix.length) {
+    body.push('## 3. 修复类目标 (Fix Goals)', '');
+    fix.forEach((g) => body.push(...renderGoal(g), ''));
+  }
+  if (enh.length) {
+    body.push('## 4. 优化类目标 (Enhancement Goals)', '');
+    enh.forEach((g) => body.push(...renderGoal(g), ''));
+  }
+
+  if (args.execution) body.push('## 5. 执行策略 (Execution Strategy)', args.execution.trim(), '');
+  if (args.verification) body.push('## 6. 验证规则 (Verification Rules)', args.verification.trim(), '');
+  if (args.termination) body.push('## 7. 终止条件 (Termination Conditions)', args.termination.trim(), '');
+
+  body.push('## 8. 状态追踪 (Status)', '', '| Goal ID | 状态 | 备注 |', '|---------|------|------|');
+  goals.forEach((g) => body.push(`| ${g.id} | 待执行 | - |`));
+  body.push('');
+
+  body.push('## 9. 迭代日志', '');
+  return head.concat(body).join('\n');
+};
+
+/* 解析外部 GOAL_LIST.MD 清单文件（兼容 markdown 表格与列表两种区块格式）；返回 issues 完整性诊断 */
+const parseGoalListFile = (text) => {
+  const out = { globalConstraints: [], goals: [], issues: [] };
+  const grab = (re) => {
+    const m = text.match(re);
+    return m ? m[1].trim() : '';
+  };
+  out.mission =
+    grab(/^## 1\. 核心使命[^\n]*\n\s*>\s*(.+)$/m) ||
+    grab(/^# AI Agent 目标设定文档[^\n]*?[—\-]\s*(.+)$/m) ||
+    grab(/^# GOAL: (.+)$/m);
+
+  const gcRows = [...text.matchAll(/^\|\s*GC-\d+\s*\|\s*(.+?)\s*\|/gm)].map((m) => m[1].trim());
+  if (gcRows.length) {
+    out.globalConstraints = gcRows;
+  } else {
+    out.globalConstraints = [...text.matchAll(/^- GC-\d+[：:]\s*(.+)$/gm)].map((m) => m[1].trim());
+  }
+
+  const lines = text.split('\n');
+  let cur = null;
+  for (const line of lines) {
+    const hm = line.match(/^### (?:Goal )?((?:FIX|ENH|BUG|FEAT)-\d+)[：:]\s*(.*)/);
+    if (hm) {
+      cur = { id: hm[1], type: hm[1].startsWith('FIX') || hm[1].startsWith('BUG') ? 'fix' : 'enhancement', title: hm[2].trim(), body: [] };
+      out.goals.push(cur);
+    } else if (cur) {
+      cur.body.push(line);
+    }
+  }
+  out.goals = out.goals
+    .map((gobj) => {
+      const body = gobj.body.join('\n');
+      const field = (name) => {
+        const tm = body.match(new RegExp(`\\|\\s*\\*\\*${name}\\*\\*\\s*\\|\\s*(.+?)\\s*\\|`));
+        if (tm) return tm[1].trim().replace(/<br\s*\/?\s*>/gi, '; ');
+        const lm = body.match(new RegExp(`^-\\s*${name}[：:]\\s*(.+)$`, 'm'));
+        return lm ? lm[1].trim() : '';
+      };
+      return {
+        id: gobj.id,
+        type: gobj.type,
+        title: gobj.title,
+        description: field('目标描述'),
+        trigger: field('触发条件'),
+        success: field('成功标准'),
+        steps: field('执行步骤'),
+        fallback: field('降级策略'),
+        constraint: field('约束条件'),
+        priority: field('优先级') || 'P2',
+      };
+    })
+    .filter((g) => g.title || g.description || g.success);
+
+  out.execution = grab(/^## 5\. (?:Agent )?执行策略[^\n]*\n([\s\S]*?)(?=\n## 6\. )/m);
+  out.verification = grab(/^## 6\. 验证规则[^\n]*\n([\s\S]*?)(?=\n## 7\. )/m);
+  out.termination = grab(/^## 7\. 终止条件[^\n]*\n([\s\S]*?)(?=\n## 8\. )/m);
+
+  if (!out.mission) out.issues.push('缺少【核心使命】（## 1. 核心使命）');
+  if (!out.globalConstraints.length) out.issues.push('缺少【全局约束】（GC-01…）');
+  if (!out.goals.length) out.issues.push('未解析到任何子目标（需要 ### FIX-XX / ENH-XX 区块）——文件可能不符合 GOAL_LIST.MD 标准格式');
+  out.goals.forEach((g) => {
+    if (!g.success) out.issues.push(`子目标 ${g.id} 缺少成功标准（勾选验收依据）`);
+  });
+  if (!out.execution) out.issues.push('缺少【执行策略】（优先级/并行规则）');
+  if (!out.verification) out.issues.push('缺少【验证规则】');
+  if (!out.termination) out.issues.push('缺少【终止条件】');
+  return out;
+};
+
+const registerGoalTools = async (tools) => {
+
+  tools['goal-set'] = tool({
+    description:
+      '创建/管理 Goal 迭代目标（目标清单按 GOAL_LIST.MD 标准格式）。新建前必须已按开工模板问卷与用户澄清完毕（核心使命/全局约束/目标清单[FIX+ENH]/执行策略/验证规则/终止条件/回滚约定）。默认 10 轮，mode=confirm 每轮确认/auto 连跑（auto 必须先完成 Pre-Flight 确认）；extend=true 追加轮次；maxIterations=0 无限需 confirmUnlimited=true。',
+    args: {
+      goal: schema.string().describe('目标标题（一句话说清要达成的最终状态，即核心使命）'),
+      mission: schema.string().optional().describe('核心使命完整描述（GOAL_LIST 标准区块 1）'),
+      globalConstraints: schema.string().optional().describe('全局约束（逗号/换行分隔，自动编号 GC-01…；GOAL_LIST 标准区块 2）'),
+      goals: schema
+        .string()
+        .optional()
+        .describe('子目标清单（JSON 数组，GOAL_LIST 标准区块 3/4）：[{"id":"FIX-01","type":"fix|enhancement","title":"...","description":"目标描述","trigger":"触发条件","success":"成功标准(可验证，多条用;分隔)","steps":"执行步骤","fallback":"降级策略","constraint":"约束条件","priority":"P0-P3"}]'),
+      execution: schema.string().optional().describe('执行策略：优先级排序/并行规则（允许/依赖/禁止）/暂停与恢复条件（GOAL_LIST 标准区块 5）'),
+      verification: schema.string().optional().describe('验证规则：通用 VR-XX + 各子目标专属验证（GOAL_LIST 标准区块 6）'),
+      termination: schema.string().optional().describe('终止条件：成功/提前/部分完成（GOAL_LIST 标准区块 7）'),
+      background: schema.string().optional().describe('背景与现状：当前代码/环境情况、相关入口文件'),
+      criteria: schema.string().optional().describe('可验证的完成标准（无 goals 时的单目标回退，逗号分隔，每条尽量附验证命令，如 "npm test 全绿(npm test)"）'),
+      constraints: schema.string().optional().describe('范围红线（逗号分隔）：禁止触碰的路径/系统/依赖；超出即 GOAL_STOP'),
+      strategy: schema.string().optional().describe('迭代策略：每轮做什么类型的工作'),
+      risks: schema.string().optional().describe('异常预案（逗号分隔，格式"情况→动作"），如 "构建连续失败3次→STOP,缺凭据→STOP"'),
+      maxIterations: schema.number().optional().describe('最大迭代轮数，默认 10；0=无限（需 confirmUnlimited=true）'),
+      mode: schema.enum(['confirm', 'auto']).optional().describe('confirm=每轮 question 请示（默认）；auto=自动连跑，所有问题必须已在 Pre-Flight 澄清'),
+      confirmUnlimited: schema.boolean().optional().describe('无限模式二次确认：maxIterations=0 时必须显式传 true'),
+      extend: schema.boolean().optional().describe('true=不给现有目标新建，而是追加轮次'),
+      addIterations: schema.number().optional().describe('extend=true 时追加的轮数，默认 5'),
+      fromFile: schema.string().optional().describe('从外部 GOAL_LIST.MD 清单文件导入并建档（自动解析核心使命/全局约束/FIX+ENH 子目标/执行策略/验证规则/终止条件）；传文件绝对路径或相对项目路径'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      ensureGitignore(context.directory);
+      const dir = path.join(mem, 'goals');
+      fs.mkdirSync(path.join(dir, 'history'), { recursive: true });
+      const activePath = path.join(dir, 'active.md');
+      const existing = readActiveGoal(context.directory);
+
+      if (existing) {
+        if (args.mode) {
+          const curMode = (existing.match(/^- 模式：(\w+)$/m) || [])[1];
+          if (curMode && curMode !== args.mode) {
+            fs.writeFileSync(activePath, existing.replace(/^- 模式：\w+$/m, `- 模式：${args.mode}`), 'utf8');
+            return `已切换运行节奏：${curMode} → ${args.mode}。${args.mode === 'auto' ? '此后空闲自动续跑，不再逐轮 question。' : '每轮轮末 question 请示。'}调用 goal-check(advance:true) 继续下一轮。`;
+          }
+        }
+        if (args.extend) {
+          const r = goalRoundOf(existing);
+          const add = Math.max(args.addIterations || 5, 1);
+          const nMax = r.max === 0 ? 0 : r.max + add;
+          fs.writeFileSync(activePath, existing.replace(/^- 轮次：\d+\/\d+$/m, `- 轮次：${r.done}/${nMax}`), 'utf8');
+          return `已追加轮次：${fmtRound({ done: r.done, max: nMax })}\n调用 goal-check(advance:true) 继续下一轮。`;
+        }
+        const t = (existing.match(/^# GOAL: (.+)$/m) || [])[1] || '';
+        return `已有活动目标「${t}」（${fmtRound(goalRoundOf(existing))}）。可传 mode 切换运行节奏（confirm/auto），或 extend=true + addIterations 追加轮次，或先 goal-close 归档再新建。`;
+      }
+
+      let imported = null;
+      if (args.fromFile) {
+        const p = path.isAbsolute(args.fromFile) ? args.fromFile : path.resolve(context.directory, args.fromFile);
+        if (!fs.existsSync(p)) return `清单文件不存在: ${args.fromFile}`;
+        try {
+          imported = parseGoalListFile(fs.readFileSync(p, 'utf8'));
+        } catch (e) {
+          return `清单文件解析失败: ${e.message}`;
+        }
+      }
+
+      const effective = {
+        ...args,
+        goal: (args.goal || (imported && imported.mission) || '未命名目标').trim(),
+        mission: args.mission || (imported && imported.mission) || undefined,
+        globalConstraints: args.globalConstraints || (imported && imported.globalConstraints.length ? imported.globalConstraints.join('，') : undefined),
+        goals: args.goals || (imported && imported.goals.length ? JSON.stringify(imported.goals) : undefined),
+        execution: args.execution || (imported && imported.execution) || undefined,
+        verification: args.verification || (imported && imported.verification) || undefined,
+        termination: args.termination || (imported && imported.termination) || undefined,
+      };
+
+      const max = args.maxIterations ?? 10;
+      if (max === 0 && !args.confirmUnlimited) {
+        return 'maxIterations=0 是无限迭代，有持续消耗 token 的风险。确认无误请带 confirmUnlimited=true 重新调用。';
+      }
+      const criteria = splitList(effective.criteria);
+      let hasGoals = false;
+      try {
+        const g = JSON.parse(effective.goals || '[]');
+        hasGoals = Array.isArray(g) && g.length > 0;
+      } catch {
+        hasGoals = false;
+      }
+      if (!hasGoals && !criteria.length) {
+        return `未解析到任何子目标${args.fromFile ? '（文件可能不符合 GOAL_LIST.MD 标准格式，需含 ### FIX-XX/ENH-XX 区块与成功标准）' : ''}。criteria 不能为空：至少提供一条可验证的完成标准，或传 goals 子目标清单（JSON 数组），或 fromFile 指向清单文件。${imported && imported.issues.length ? `\n清单文件诊断：\n${imported.issues.map((i) => `  - ${i}`).join('\n')}` : ''}`;
+      }
+
+      const mode = args.mode === 'auto' ? 'auto' : 'confirm';
+      const content = buildGoalDoc(effective, mode, max);
+      fs.writeFileSync(activePath, content, 'utf8');
+      writeIndex(mem, { task: `[GOAL] ${effective.goal}`, stage: '目标已设定' });
+
+      const nGoals = hasGoals ? JSON.parse(effective.goals).length : 1;
+      return [
+        `GOAL 已建立（GOAL_LIST.MD 标准格式）：.memory/goals/active.md`,
+        `核心使命：${effective.goal}`,
+        `子目标：${nGoals} 个（${hasGoals ? 'FIX/ENH 拆分' : '单目标 FIX-01'}）`,
+        ...(args.fromFile ? [`来源：${args.fromFile}`] : []),
+        ...(splitList(effective.globalConstraints).length ? [`全局约束：${splitList(effective.globalConstraints).length} 条（GC 编号）`] : []),
+        `轮次：0/${max === 0 ? '∞' : max}｜节奏：${mode === 'auto' ? 'auto 自动连跑（空闲自驱续跑，达标/达上限/异常才停）' : 'confirm 每轮 question 请示'}`,
+        effective.constraints ? '⚠️ 已登记范围红线，触碰即停。' : '',
+        ...(imported && imported.issues.length ? ['⚠️ 清单文件补全提示（缺项需询问用户补齐）：', ...imported.issues.map((i) => `  - ${i}`), ''] : []),
+        '',
+        mode === 'confirm'
+          ? '下一步：用 question 与用户最终确认目标清单与运行节奏，然后每轮以 goal-check(advance:true) 开始；每轮前后各建 git checkpoint。'
+          : '下一步（auto 无人值守）：确认 Pre-Flight 已完成（验证规则可自动执行/红线明确/异常预案齐备），记录基线 commit hash 到日志，然后每轮以 goal-check(advance:true) 开始；空闲自动续跑。',
+      ].filter(Boolean).join('\n');
+    },
+  });
+
+  tools['goal-check'] = tool({
+    description:
+      '读取 Goal 状态卡并获取当轮指令。每轮迭代开始必须调用 goal-check(advance:true)（自增轮次）；不传 advance 则仅查看。返回是否达标/达上限及下一步动作。',
+    args: {
+      advance: schema.boolean().optional().describe('true=进入下一轮（轮次+1 并写入日志头）；默认 false 仅查看'),
+    },
+    async execute(args, context) {
+      let content = readActiveGoal(context.directory);
+      if (!content) return '当前无活动目标。用 goal-set 创建。';
+      if (args.advance) {
+        const r = goalRoundOf(content);
+        content = content.replace(/^- 轮次：\d+\/\d+$/m, `- 轮次：${r.done + 1}/${r.max}`) + `\n### 第 ${r.done + 1} 轮\n`;
+        fs.writeFileSync(path.join(memoryDir(context.directory), 'goals', 'active.md'), content, 'utf8');
+      }
+      const cur = goalRoundOf(content);
+      const { open, done } = countChecks(content);
+      const goalTitle = (content.match(/^# GOAL: (.+)$/m) || [])[1] || '';
+      const mode = (content.match(/^- 模式：(\w+)$/m) || [])[1] || 'confirm';
+      const constraints =
+        content.match(/^## (?:2\. )?全局约束[^\n]*\n([\s\S]*?)(?=\n## |\n### )/m) ||
+        content.match(/^## 范围红线[^\n]*\n([\s\S]*?)(?=\n## |\n### )/m);
+      const redlines = constraints ? (constraints[1].match(/^- .+$/gm) || []) : [];
+
+      const blocks = parseGoalBlocks(content);
+      const lines = [
+        '## GOAL 状态卡',
+        `- 目标：${goalTitle}`,
+        `- 轮次：${fmtRound(cur)}｜标准：${done} 达成 / ${open} 待办`,
+        `- 本轮动作：${args.advance ? `进入第 ${cur.done} 轮` : '仅查看（未推进轮次）'}`,
+        ...(redlines.length ? [`- 🚫 红线/全局约束（触碰即 GOAL_STOP）：`, ...redlines.map((l) => `  ${l}`)] : []),
+        '',
+      ];
+
+      if (blocks.length) {
+        lines.push('子目标进度（分步注入：完整清单在 .memory/goals/active.md，按需读取当前子目标详情，不整篇回显）：');
+        lines.push('| 子目标 | 优先级 | 进度 |');
+        lines.push('|--------|--------|------|');
+        for (const b of blocks) {
+          const tag = b.open === 0 && b.done > 0 ? '✅' : b.open === 0 ? '—' : '⏳';
+          lines.push(`| ${b.title} | ${b.priority || '—'} | ${tag} ${b.done}/${b.done + b.open} |`);
+        }
+        lines.push('');
+      }
+
+      lines.push('防倒退契约：优先处理上轮遗留的未勾选标准，解决前不得绕开做新工作；同一标准连续 3 轮无新证据 → 停下 question 用户（auto 模式按异常预案处理或输出 GOAL_STOP）。');
+      lines.push('每轮 checkpoint：轮前记录基线（git commit/stash，hash 写入日志），轮末提交 git -c commit.gpgsign=false commit -m "checkpoint(goal): 第N轮 <摘要>"（禁用 GPG 签名防弹窗卡死）；禁止启动长驻进程；判定达标必须以真实命令输出为据。');
+      lines.push('');
+
+      if (!open && done > 0) {
+        lines.push('✅ 全部验收标准已勾选 → 进入【总体验收】：逐条重跑全部验证规则（通用 VR + 各子目标专属）核对真实命令输出。');
+        lines.push('   验收全部通过 → goal-close(result:"achieved", summary) → save-progress → 回复末尾输出哨兵 GOAL_ACHIEVED。');
+        lines.push('   验收发现不合格 → 禁止 close：git reset --hard 回滚到最近 checkpoint(goal) 提交，把失败子目标标记回 - [ ]，日志记录原因与重做计划，继续下一轮打回重做。');
+      } else if (cur.max !== 0 && cur.done >= cur.max) {
+        lines.push('⛔ 已达轮次上限：禁止继续执行。必须 question 问用户——加轮次（goal-set extend:true, addIterations:N）或放弃（goal-close result:"abandoned"）。');
+      } else {
+        if (cur.max === 0 && cur.done > 0 && cur.done % 5 === 0) {
+          lines.push('⚠️ 无限模式已连跑 5 的倍数轮：先 question 阶段性汇报，再继续。');
+        }
+        lines.push(
+          mode === 'auto'
+            ? '▶️ 未达标：继续执行本轮工作（auto 连跑，无人值守——遇异常预案情形直接 GOAL_STOP，不猜测不等待）。'
+            : '▶️ 未达标：执行本轮工作，轮末用 question 向用户汇报结果并请示是否继续（若用户想无人值守自动连跑，调用 goal-set(mode:"auto") 切换节奏，无需重建）。'
+        );
+      }
+      return lines.join('\n');
+    },
+  });
+
+  tools['goal-close'] = tool({
+    description:
+      '归档活动 Goal：achieved=全部标准达成；abandoned=用户叫停/不可行。归档到 .memory/goals/history/ 并移除 active.md。close 后必须 save-progress。',
+    args: {
+      result: schema.enum(['achieved', 'abandoned']).describe('achieved=达成；abandoned=放弃/中止'),
+      summary: schema.string().describe('一句话总结（达成了什么/为何中止）'),
+    },
+    async execute(args, context) {
+      const mem = ensureMemoryDir(context.directory);
+      const raw = readActiveGoal(context.directory);
+      if (!raw) return '当前无活动目标。';
+      const dir = path.join(mem, 'goals', 'history');
+      fs.mkdirSync(dir, { recursive: true });
+      const title = (raw.match(/^# GOAL: (.+)$/m) || [])[1] || 'goal';
+      const file = path.join(dir, `${timestamp()}-${slugify(title)}.md`);
+      const label = args.result === 'achieved' ? '✅ 达成' : '⛔ 中止';
+      fs.writeFileSync(file, `> 结果：${label}\n> 总结：${args.summary || '—'}\n\n${raw}`, 'utf8');
+      fs.unlinkSync(path.join(mem, 'goals', 'active.md'));
+      const idx = writeIndex(mem, { task: `[GOAL] ${title}`, stage: `已归档（${label}）` });
+      appendSessionTrace(mem, { task: `[GOAL] ${title}`, stage: args.result, source: 'goal-close' });
+      // Goal 完成时自动解锁路由
+      clearRouteState(context.directory, context.sessionID);
+      return `GOAL 已归档（${label}）: ${file}\n${idx.message}\n别忘了 save-progress。`;
+    },
+  });
+
+  return { ok: true };
+};
+
+
+/* ================= OpenCode V2 plugin definition ================= */
+
+const toToolInfo = (name, def, projectDir) => ({
+  name,
+  description: def.description,
+  input: buildInput(def.args),
+  execute: async (input, context) => {
+    const out = await def.execute(input || {}, { ...(context || {}), directory: projectDir });
+    if (typeof out === 'string') return { content: out };
+    if (out && typeof out === 'object' && 'content' in out) return out;
+    return { content: String(out ?? '') };
+  },
+});
+
+const walkSkillFiles = (root) => {
+  const out = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name === 'SKILL.md') out.push(full);
+    }
+  };
+  walk(root);
+  return out;
+};
+
+const parseFrontmatter = (text) => {
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { data: {}, body: text };
+  const data = {};
+  const lines = match[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const mm = lines[i].match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    if (!mm) continue;
+    const key = mm[1];
+    let value = mm[2].trim();
+    if (/^[>|][+-]?$/.test(value)) {
+      // YAML 块标量：> 折叠（空格连接），| 保留换行
+      const folded = value[0] === '>';
+      const parts = [];
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) {
+        i += 1;
+        parts.push(lines[i].replace(/^\s+/, ''));
+      }
+      value = folded ? parts.join(' ') : parts.join('\n');
+    } else {
+      value = value.replace(/^["']|["']$/g, '');
+    }
+    data[key] = value;
+  }
+  return { data, body: match[2] };
+};
+
+const discoverSkills = (skillsDir) =>
+  walkSkillFiles(skillsDir).map((file) => {
+    const { data, body } = parseFrontmatter(readOrEmpty(file));
+    const id = path.basename(path.dirname(file));
+    return {
+      id,
+      name: data.name || id,
+      description: data.description || `junsi-dev-toolkit 子技能：${id}`,
+      path: file,
+      content: body,
+    };
+  });
+
+const buildCompactionContext = (projectDir) => {
+  const parts = ['## junsi-dev-toolkit 记忆上下文'];
+  const up = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+  if (up.trim()) parts.push('', '### 全局用户偏好（跨项目生效）', up.slice(0, MEMORY_LIMITS.compactPreference));
+  const mem = memoryDir(projectDir);
+  if (!fs.existsSync(mem)) return parts.length > 1 ? parts.join('\n') : '';
+  const idx = readOrEmpty(path.join(mem, 'INDEX.md'));
+  if (idx) parts.push('', '### 任务索引', idx.slice(0, MEMORY_LIMITS.compactIndex));
+  const recent = listRecentDecisions(mem, MEMORY_LIMITS.compactDecision);
+  if (recent.length) {
+    const cards = recent
+      .map((f) => {
+        const c = readOrEmpty(path.join(mem, 'decisions', f));
+        return `- **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 6).join('\n')}`;
+      })
+      .join('\n---\n');
+    parts.push('', '### 关键决策画像（最近 ' + recent.length + ' 条，需决策依据时读取全文）', cards);
+  }
+  const gDecDir = path.join(userMemoryDir(), 'decisions');
+  if (fs.existsSync(gDecDir)) {
+    const gRecent = fs.readdirSync(gDecDir).filter((f) => f.endsWith('.md')).sort().reverse().slice(0, MEMORY_LIMITS.compactDecision);
+    if (gRecent.length) {
+      const cards = gRecent
+        .map((f) => {
+          const c = readOrEmpty(path.join(gDecDir, f));
+          return `- 🌐 **${readDecisionTitle(c, f)}**（${f.slice(0, 10)}）\n${c.split('\n').filter((l) => l.trim()).slice(1, 5).join('\n')}`;
+        })
+        .join('\n---\n');
+      parts.push('', '### 全局决策画像（跨项目，最近 ' + gRecent.length + ' 条）', cards);
+    }
+  }
+  const handoff = readOrEmpty(path.join(mem, 'HANDOFF.md'));
+  if (handoff) parts.push('', '### HANDOFF（自包含恢复包，前 ' + MEMORY_LIMITS.compactHandoff + ' 字）', handoff.slice(0, MEMORY_LIMITS.compactHandoff));
+  return parts.join('\n');
+};
+
+const toV2Agent = (id, def) => {
+  const name = id
+    .split('-')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ');
+  const spec = { name, mode: def.mode || 'subagent', hidden: false };
+  if (def.description !== undefined) spec.description = def.description;
+  if (def.prompt !== undefined) spec.system = def.prompt;
+  if (def.model) {
+    const [providerID, ...rest] = String(def.model).split('/');
+    if (providerID && rest.length) spec.model = { providerID, id: rest.join('/') };
+  }
+  const perms = [];
+  for (const [action, value] of Object.entries(def.permission || {})) {
+    if (typeof value === 'string') perms.push({ action, resource: '*', effect: value });
+    else if (value && typeof value === 'object') {
+      for (const [resource, effect] of Object.entries(value)) perms.push({ action, resource, effect });
+    }
+  }
+  if (perms.length) spec.permissions = perms;
+  const body = {};
+  if (typeof def.temperature === 'number') body.temperature = def.temperature;
+  if (def.options && typeof def.options === 'object') Object.assign(body, def.options);
+  if (Object.keys(body).length) spec.request = { body };
+  return spec;
+};
+
+const applyAgentSpec = (agent, spec) => {
+  agent.name = spec.name;
+  if (spec.description !== undefined) agent.description = spec.description;
+  agent.mode = spec.mode;
+  agent.hidden = false;
+  if (spec.system !== undefined) agent.system = spec.system;
+  if (spec.model) agent.model = spec.model;
+  if (spec.permissions) agent.permissions = spec.permissions;
+  if (spec.request) {
+    agent.request = agent.request || {};
+    agent.request.body = { ...(agent.request.body || {}), ...spec.request.body };
+  }
+};
+
+const sessionAgentOf = async (ctx, sessionID) => {
+  try {
+    const res = await ctx.session.get({ sessionID });
+    const info = res && res.data ? res.data : res;
+    return (info && info.agent) || '';
+  } catch {
+    return '';
+  }
+};
+
+const jlog = (message, level = 'info') => {
+  try {
+    if (level === 'warn' || level === 'error') console.error(`[junsi-dev-toolkit] ${message}`);
+    else console.log(`[junsi-dev-toolkit] ${message}`);
+  } catch {
+    // 忽略日志失败
+  }
+};
+
+export default Plugin.define({
+  id: 'junsi-dev-toolkit',
+  async setup(ctx) {
+    const projectDir = ctx.location.directory;
+    const skillsDir = path.resolve(__dirname, '../../.agents/skills/junsi-dev-toolkit');
+
+    /* ---- 1. 自定义工具 ---- */
+    const tools = {};
+    await registerMemoryTools(tools);
+    await registerRddTools(tools);
+    await registerClusterTools(tools, skillsDir);
+    await registerUtilityTools(tools);
+    await registerGoalTools(tools);
+
+    await ctx.tool.transform((editor) => {
+      for (const [name, def] of Object.entries(tools)) {
+        editor.add(toToolInfo(name, def, projectDir));
+      }
+    });
+
+    /* ---- 2. 子技能注册（V2 发现机制） ---- */
+    try {
+      const skills = discoverSkills(skillsDir);
+      await ctx.skill.transform((editor) => {
+        for (const skill of skills) {
+          if (editor.get(skill.id)) {
+            editor.update(skill.id, (s) => {
+              s.name = skill.name;
+              s.description = skill.description;
+              s.path = skill.path;
+              s.content = skill.content;
+            });
+          } else {
+            editor.add(skill);
+          }
+        }
+      });
+    } catch (e) {
+      jlog(`子技能注册失败: ${e && e.message ? e.message : e}`, 'warn');
+    }
+
+    /* ---- 3. Cluster / Goal / Penetration agents ---- */
+    try {
+      const existing = await ctx.agent.list();
+      const existingIds = new Set(((existing && existing.data) || existing || []).map((a) => a.id));
+      const clusterAgents = buildClusterAgents(scanAvailableModels(), skillsDir);
+      await ctx.agent.transform((editor) => {
+        for (const [id, def] of Object.entries(clusterAgents)) {
+          if (existingIds.has(id)) continue;
+          editor.update(id, (agent) => applyAgentSpec(agent, toV2Agent(id, def)));
+        }
+      });
+    } catch (e) {
+      jlog(`agent 注册失败: ${e && e.message ? e.message : e}`, 'warn');
+    }
+
+    /* ---- 4. 路由注入（prompt 准入钩子：只做判定 + 暂存） ---- */
+    const seenSessions = new Set();
+    // 注入内容不写回用户消息，改由 context 钩子追加到 system 提示，避免污染用户输入。
+    const pendingSystemInjections = new Map();
+    await ctx.session.hook('prompt', async (event) => {
+      try {
+        const sid = event.sessionID;
+        const text = (event.prompt && event.prompt.text) || '';
+        const userText = text.toLowerCase();
+        const isFirst = !seenSessions.has(sid);
+        seenSessions.add(sid);
+
+        const agent = await sessionAgentOf(ctx, sid);
+        const exclusive = EXCLUSIVE_AGENTS.has(agent);
+        const wantsToolkit =
+          (userText.includes('junsi-dev-toolkit') || userText.includes('junsi-dev-tools')) &&
+          (userText.includes('路由表') || userText.includes('routing table'));
+        const wantsSwitch = userText.includes('切换路由') || userText.includes('换流程') || userText.includes('重新匹配');
+        // 去掉切换指令本身再匹配，避免「切换路由」里的"路由"误命中 project-docs
+        const newRoute = matchRoute(wantsSwitch ? userText.replace(/切换路由|换流程|重新匹配/g, ' ') : userText);
+        const injections = [];
+
+        let route = null;
+        const phaseNotes = [];
+        if (exclusive) {
+          clearRouteState(projectDir);
+        } else {
+          lastActiveSession = sid;
+          if (wantsToolkit) clearRouteState(projectDir);
+          // 显式"切换路由"：只解锁本会话，随后重新匹配
+          if (wantsSwitch) clearRouteState(projectDir, sid);
+
+          if (!wantsToolkit) {
+            const routeState = wantsSwitch ? null : readRouteState(projectDir, sid);
+            const locked = routeState ? ROUTES.find((r) => r.id === routeState.route) : null;
+            if (locked) {
+              // 锁优先：补充信息/同类关键词不得顶掉当前流程，只有显式"切换路由"才切
+              route = locked;
+              touchRouteState(projectDir, sid);
+              if (newRoute && newRoute.id !== locked.id) {
+                phaseNotes.push(
+                  `- 本次消息疑似 \`${newRoute.id}\` 意图，但当前会话已锁定 \`${locked.id}\` 流程，继续沿用。若确实要换流程，请告知用户并让用户回复「切换路由」。`
+                );
+              }
+            } else {
+              route = newRoute;
+              if (route) {
+                writeRouteState(projectDir, sid, {
+                  route: route.id,
+                  phase: route.id === RDD_ROUTE ? 'clarify' : 'n/a',
+                });
+              }
+            }
+
+            if (route && route.id === RDD_ROUTE) {
+              const st = readRouteState(projectDir, sid);
+              const prevPhase = (st && st.phase) || 'clarify';
+              let phase = prevPhase;
+              const trimmed = text.trim();
+              const scopeChange = RDD_SCOPE_CHANGE_RE.test(trimmed);
+
+              if (phase === 'clarify' || phase === 'plan-pending') {
+                if (RDD_CONFIRM_RE.test(trimmed)) {
+                  phase = 'implement';
+                  phaseNotes.push('- 已识别用户确认口令 → 阶段切换为 IMPLEMENT。开工前必须 git checkpoint 并贴出 hash。');
+                } else if (RDD_SKIP_PLAN_RE.test(trimmed)) {
+                  phase = 'implement';
+                  phaseNotes.push('- 用户明确要求跳过方案确认 → 阶段切换为 IMPLEMENT（仅此一次）。开工前必须 git checkpoint 并贴出 hash。');
+                }
+              } else if (phase === 'implement' && scopeChange) {
+                phase = 'clarify';
+                phaseNotes.push(
+                  '- ⚠️ 检测到疑似范围变更（新增/改动需求）：回到 CLARIFY。先判断——细节纠正（字段名/文案/路径）可直接并入并说明；新增功能或行为变更必须更新完整方案、调用 `rdd-phase(action:"plan")` 并等用户确认。'
+                );
+              } else if (phase === 'verify' && scopeChange) {
+                phase = 'clarify';
+                phaseNotes.push('- 上一任务已进入 VERIFY，本次为新需求：重新走 CLARIFY，不得直接续写代码。');
+              }
+
+              if (phase !== prevPhase) setRoutePhase(projectDir, sid, phase);
+
+              // 分支纪律：记录基线分支，收尾时提示合并/切回
+              const branchNow = currentGitBranch(projectDir);
+              if (phase === 'implement' && branchNow) {
+                setRouteBaseBranch(projectDir, sid, defaultGitBranch(projectDir) || branchNow);
+              }
+              if ((phase === 'implement' || phase === 'verify') && branchNow) {
+                const base = (readRouteState(projectDir, sid) || {}).baseBranch || '';
+                if (phase === 'verify') {
+                  phaseNotes.push(
+                    branchNow === base
+                      ? `- 当前分支：\`${branchNow}\`（基线，无需切换）。收尾回复里报告"已在基线分支 ${branchNow}"。`
+                      : `- 当前分支：\`${branchNow}\`，基线分支：\`${base || '未知'}\`。收尾必须回基线：PR 项目 → 开 PR，合并后 \`git checkout ${base || '<base>'} && git pull --ff-only && git branch -d ${branchNow}\`；不走 PR 的项目 → \`git checkout ${base || '<base>'} && git merge --ff-only ${branchNow} && git branch -d ${branchNow}\`。PR 未合并时明确报告分支名与 PR 链接，禁止静默留在工作分支。`
+                  );
+                } else {
+                  phaseNotes.push(
+                    base && base !== branchNow
+                      ? `- 当前分支：\`${branchNow}\`，基线：\`${base}\`。checkpoint 提交在当前工作分支；收尾要回基线。`
+                      : `- 当前分支：\`${branchNow}\`（基线）。checkpoint 就提交在这里，不要为备份新建分支。`
+                  );
+                }
+              }
+
+              injections.push(buildRouteInjection(route, skillsDir));
+              injections.push(buildPhaseBanner(phase, phaseNotes));
+            } else if (route) {
+              injections.push(buildRouteInjection(route, skillsDir));
+            } else if (isFirst) {
+              injections.push(buildFullRoutingTable());
+            }
+          }
+        }
+
+        if (!exclusive) {
+          if (wantsToolkit) injections.push(buildFullRoutingTable());
+        } else {
+          injections.push(
+            [
+              '# junsi-dev-toolkit：独占模式（绕过常规路由）',
+              `当前 agent 为 \`${agent}\`（独占模式）。不注入开发子技能路由（diagnose/rdd 等），严格按本模式主 agent 指令执行；仍须遵守记忆类规范（store-decision/save-progress）。`,
+              INJECT_MARK,
+            ].join('\n')
+          );
+        }
+
+        if (isFirst) {
+          const upref = readOrEmpty(path.join(userMemoryDir(), 'preferences.md'));
+          if (upref.trim()) {
+            injections.push(
+              [
+                '# junsi-dev-toolkit：全局用户记忆',
+                '以下为跨项目全局偏好（~/.config/opencode/.memory/preferences.md），开工前必须遵守：',
+                '',
+                upref.slice(0, MEMORY_LIMITS.compactPreference),
+                INJECT_MARK,
+              ].join('\n')
+            );
+          }
+          if (fs.existsSync(path.join(memoryDir(projectDir), 'HANDOFF.md'))) {
+            injections.push(
+              [
+                '# junsi-dev-toolkit：检测到 HANDOFF',
+                `存在 \`.memory/HANDOFF.md\`（${new Date(fs.statSync(path.join(memoryDir(projectDir), 'HANDOFF.md')).mtime).toLocaleString()}）`,
+                '1. 调用 `restore-handoff` 工具读取完整恢复包',
+                '2. 按恢复包继续任务，不要重新扫描项目',
+                INJECT_MARK,
+              ].join('\n')
+            );
+          }
+          if (fs.existsSync(path.join(memoryDir(projectDir), 'goals', 'active.md'))) {
+            injections.push(
+              [
+                '# junsi-dev-toolkit：检测到活动 Goal',
+                '存在 `.memory/goals/active.md`（未完成的迭代目标）。',
+                '1. 调用 `goal-check`（不传 advance）读取目标与进度',
+                '2. 按状态卡指令继续迭代：达标 → goal-close(achieved)；用户叫停 → goal-close(abandoned)',
+                INJECT_MARK,
+              ].join('\n')
+            );
+          }
+        }
+
+        // 安全护栏每轮都注入（system 不持久，只在当轮有效）
+        injections.unshift(safetyRulesText());
+        if (injections.length) pendingSystemInjections.set(sid, injections.join('\n\n'));
+        else pendingSystemInjections.delete(sid);
+      } catch (e) {
+        jlog(`路由注入失败: ${e && e.message ? e.message : e}`, 'warn');
+      }
+    });
+
+    /* ---- 4b. 系统提示注入（context 钩子：追加到 system，不污染用户消息） ---- */
+    await ctx.session.hook('context', (event) => {
+      try {
+        const pending = pendingSystemInjections.get(event.sessionID);
+        if (pending) {
+          event.system.push({ type: 'text', text: pending });
+          pendingSystemInjections.delete(event.sessionID);
+        }
+      } catch (e) {
+        jlog(`系统提示注入失败: ${e && e.message ? e.message : e}`, 'warn');
+      }
+    });
+
+    /* ---- 5. 压缩钩子：注入记忆上下文 ---- */
+    await ctx.session.hook('compaction', (event) => {
+      try {
+        event.system.push({ type: 'text', text: safetyRulesText() });
+        const context = buildCompactionContext(projectDir);
+        if (context) event.system.push({ type: 'text', text: context });
+      } catch {
+        // 压缩注入失败不阻塞
+      }
+    });
+
+    /* ---- 5b. 命令级护栏：递归删除主目录/受保护目录直接拦截 ---- */
+    try {
+      await ctx.session.hook('tool.execute.before', (input, output) => {
+        const hit = detectDangerousCommand(input && input.tool, output && output.args);
+        if (hit) {
+          throw new Error(
+            `[junsi-dev-toolkit 安全护栏] 已拦截危险命令（${hit}）。请改为明确的项目内子目录，或让用户手动执行。`
+          );
+        }
+      });
+      guardActive = true;
+    } catch (e) {
+      guardActive = false;
+      jlog(`命令护栏注册失败（仅提示词护栏生效）: ${e && e.message ? e.message : e}`, 'warn');
+    }
+
+    /* ---- 6. session.idle：记忆骨架 + Goal 自驱续跑 ---- */
+    let goalIdleContinueBroken = false;
+    let lastContinueAt = 0;
+    let lastContinueRound = -1;
+
+    const onSessionIdle = async (event) => {
+      const sid = (event && event.data && event.data.sessionID) || '';
+      try {
+        const mem = ensureMemoryDir(projectDir);
+        const recent = listRecentDecisions(mem, 3);
+        const progress = readOrEmpty(path.join(mem, 'progress', 'current.md'));
+        const handoff = fs.existsSync(path.join(mem, 'HANDOFF.md'));
+        const sessionFile = path.join(mem, 'sessions', `${timestamp()}.md`);
+        fs.writeFileSync(
+          sessionFile,
+          [
+            '# 会话痕迹',
+            `- 时间：${new Date().toISOString().slice(0, 16).replace('T', ' ')}`,
+            '- 类型：session.idle 自动记录',
+            `- 决策：${decisionFiles(mem).length} 条`,
+            `- HANDOFF：${handoff ? '就绪' : '无'}`,
+            '',
+            '## 进度摘要',
+            progress ? progress.split('\n').slice(0, 8).join('\n') : '（无）',
+            '',
+            '## 决策摘要',
+            recent.length ? recent.map((f) => `- ${readDecisionTitle(readOrEmpty(path.join(mem, 'decisions', f)), f)}`).join('\n') : '（无）',
+            '',
+          ].join('\n'),
+          'utf8'
+        );
+
+        const active = readActiveGoal(projectDir);
+        if (active && /^- 模式：auto$/m.test(active) && !goalIdleContinueBroken) {
+          const r = goalRoundOf(active);
+          const open = countChecks(active).open;
+          const limitHit = r.max !== 0 && r.done >= r.max;
+          if (!limitHit && open > 0 && sid) {
+            const now = Date.now();
+            if (now - lastContinueAt < 30000 || r.done === lastContinueRound) return;
+            lastContinueAt = now;
+            lastContinueRound = r.done;
+            try {
+              await ctx.session.prompt({
+                sessionID: sid,
+                text: '继续 Goal 迭代：调用 goal-check(advance:true)，严格按状态卡指令完成本轮。无人值守运行：遇范围红线/异常预案情形直接按预案 GOAL_STOP，不猜测不等待。',
+              });
+            } catch (e) {
+              goalIdleContinueBroken = true;
+              jlog(
+                `Goal idle 自驱续跑不可用（本会话已禁用，请改用 scripts/goal-loop.ps1 外部硬循环）: ${e && e.message ? e.message : e}`,
+                'warn'
+              );
+            }
+          }
+        }
+      } catch {
+        // idle 记录失败不阻塞
+      }
+    };
+
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event && event.type === 'session.idle') await onSessionIdle(event);
+        }
+      } catch {
+        // 订阅中断（卸载）忽略
+      }
+    })();
+
+    return () => controller.abort();
+  },
+});
