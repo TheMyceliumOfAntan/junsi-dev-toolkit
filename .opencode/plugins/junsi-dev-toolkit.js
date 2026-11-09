@@ -71,7 +71,8 @@ const SAFETY_RULES = [
   '4. **删除目标必须是字面路径**：禁止用变量、`Split-Path`、`Join-Path`、`..` 拼出删除目标。PowerShell 变量名大小写不敏感（`$home` = `$HOME` = `$Home`，且是只读自动变量），赋值会静默失败，真实路径在运行前不可见 —— 护栏会直接拦。',
   '5. 卸载/重装运行时或全局包（rustup / pnpm / bun / `npm i -g` / `winget uninstall`）前必须先用 `question` 问用户。',
   '6. 只清理明确的项目内产物（`./dist`、`./build`、`./node_modules`），且先列出目标再删。',
-  '7. 违反以上任一条 = 立即停止并报告用户，不得自行"修复"或"清理现场"。',
+  '7. **文件编辑必须用编辑工具**（`edit` / `write`）：禁止用 PowerShell `Set-Content` / `Out-File` / `Add-Content` / `-replace` 或 `>` 重定向写源码与文档。Windows PowerShell 5.1 默认 ANSI(GBK)，会把 UTF-8 中文写成乱码，损坏后可能无法 `git checkout` 恢复；临时文件确需写时用 `[IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))`。',
+  '8. 违反以上任一条 = 立即停止并报告用户，不得自行"修复"或"清理现场"。',
   '',
   '> 违反本条造成的损失不可逆（本次事故：`~/.bun`、`~/.cargo/bin`、pnpm 全局目录被删）。',
 ].join('\n');
@@ -102,6 +103,9 @@ const computedTarget = (cmd) => {
 };
 const PROTECTED_PATH_RE =
   /(?:^|[\\/\s"'=])(?:\.ssh|\.gnupg|\.config|\.cargo|\.rustup|\.bun|\.local|AppData|Program\s+Files|Windows|System32)(?:[\\/"'\s]|$)/i;
+/* PowerShell 写文件：Windows PowerShell 5.1 默认 ANSI(GBK)，UTF-8 源码/文档会被写成乱码 */
+const PS_WRITE_RE =
+  /\b(?:Set-Content|Out-File|Add-Content)\b[^\n;]*?\.(?:markdown|jsonc|json|mjs|cjs|tsx|jsx|html|yml|yaml|toml|scss|svelte|properties|gradle|psm1|ps1|kts|kt|ts|js|md|py|rs|css|vue|go|java|cs|cpp|hpp|sql|xml|sh|c|h)\b/i;
 const SHELL_TOOLS = new Set(['bash', 'shell', 'terminal', 'pwsh', 'powershell']);
 
 /* 命令护栏是否真的注册成功。注册失败时把告警写进注入的 system 提示，不再静默降级 */
@@ -117,6 +121,7 @@ const detectDangerousCommand = (tool, args) => {
   if (!raw) return null;
   const cmd = raw.replace(/[ \t]#.*$/gm, ''); // 行尾注释不参与判定
   if (!cmd) return null;
+  if (PS_WRITE_RE.test(cmd)) return `用 PowerShell 写源码/文档（PS 5.1 默认 GBK，UTF-8 中文会乱码）：${cmd.slice(0, 200)}`;
   if (!DESTRUCTIVE_VERB_RE.test(cmd)) return null;
   if (computedTarget(cmd)) return `删除目标由变量/表达式计算，无法确认真实路径：${cmd.slice(0, 200)}`;
   if (HOME_TARGET_RE.test(cmd)) return `目标命中用户主目录/盘根：${cmd.slice(0, 200)}`;

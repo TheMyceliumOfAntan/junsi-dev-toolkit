@@ -117,6 +117,7 @@ Tab 切换到 `penetration` agent 起专属渗透测试会话：按 OWASP WSTG 8
 - 删除前必须打印解析后的绝对路径，路径含通配符或层级过浅即停手；
 - 禁止删除 `.ssh`、`.config`、`.cargo`、`.rustup`、`.bun`、`.local`、`AppData`、`Program Files`、`.git`；
 - 项目内 `./dist`、`./build`、`./node_modules` 的清理照常允许。
+- 禁止用 PowerShell `Set-Content` / `Out-File` / `Add-Content` 写源码与文档（Windows PowerShell 5.1 默认 ANSI/GBK，UTF-8 中文会乱码），一律用编辑工具；临时文件用 `[IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))`。
 
 > 建议同时在 `~/.config/opencode/AGENTS.md` 写一份同样的规则（本机已写入），双保险。
 

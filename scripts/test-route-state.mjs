@@ -252,6 +252,7 @@ console.log('\n== 10. 破坏性操作护栏 ==');
   const { injected } = await send('s5', '今天天气怎么样');
   check(injected.includes('破坏性操作硬规则'), '纯问答也注入安全硬规则');
   check(injected.includes('大小写不敏感'), '安全规则写明 PowerShell 变量名不区分大小写');
+  check(injected.includes('文件编辑必须用编辑工具'), '安全规则写明禁止 PowerShell 写文件');
   const again = await send('s5', '再问一句');
   check(again.injected.includes('破坏性操作硬规则'), '第二轮仍注入安全硬规则');
 
@@ -296,6 +297,14 @@ console.log('\n== 10. 破坏性操作护栏 ==');
   check(!(await blocked('Remove-Item .\\node_modules -Recurse -Force')), '放行项目内 node_modules');
   check(!(await blocked('rm -rf ./dist')), '放行项目内 dist');
   check(!(await blocked('ls ~/.cargo')), '普通读取不拦截');
+  check(await blocked('Set-Content -Path D:\\x\\a.js -Value "x"'), '拦截 Set-Content 写 .js');
+  check(await blocked('"x" | Out-File -Encoding utf8 README.md'), '拦截 Out-File 写 .md');
+  check(!(await blocked('Set-Content -Path $env:TEMP\\a.txt -Value "x"')), '放行写 .txt 临时文件');
+  check(
+    !(await blocked('[IO.File]::WriteAllText($p, $s, [Text.UTF8Encoding]::new($false))')),
+    '放行 WriteAllText 显式 UTF-8'
+  );
+  check(!(await blocked('Get-Content README.md -TotalCount 5')), '放行读取 .md');
 }
 
 fs.rmSync(harness, { recursive: true, force: true });
